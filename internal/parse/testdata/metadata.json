@@ -1,0 +1,18 @@
+{
+  "id": "18c1",
+  "threadId": "18c1t",
+  "labelIds": ["INBOX", "UNREAD"],
+  "snippet": "Hello there",
+  "historyId": "12345",
+  "internalDate": "1700000000000",
+  "sizeEstimate": 4096,
+  "payload": {
+    "headers": [
+      {"name": "From", "value": "Alice <alice@example.com>"},
+      {"name": "To", "value": "Bob <bob@example.com>, Carol <carol@example.com>"},
+      {"name": "Cc", "value": "cc@example.com"},
+      {"name": "Subject", "value": "Hi"},
+      {"name": "Date", "value": "Wed, 15 Nov 2023 12:00:00 +0000"}
+    ]
+  }
+}

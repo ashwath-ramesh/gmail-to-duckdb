@@ -1,0 +1,27 @@
+{
+  "id": "18c2",
+  "threadId": "18c2t",
+  "labelIds": ["SENT"],
+  "snippet": "Thanks",
+  "historyId": "99",
+  "internalDate": "1700001000000",
+  "sizeEstimate": 2048,
+  "payload": {
+    "mimeType": "multipart/alternative",
+    "headers": [
+      {"name": "From", "value": "me@example.com"},
+      {"name": "To", "value": "you@example.com"},
+      {"name": "Subject", "value": "Re: Hi"}
+    ],
+    "parts": [
+      {
+        "mimeType": "text/plain",
+        "body": {"data": "VGhhbmtzIGZvciB0aGUgbm90ZQ==", "size": 20}
+      },
+      {
+        "mimeType": "text/html",
+        "body": {"data": "PHA+VGhhbmtzPC9wPg==", "size": 13}
+      }
+    ]
+  }
+}

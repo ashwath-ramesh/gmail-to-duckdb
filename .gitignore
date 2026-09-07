@@ -1,0 +1,9 @@
+/gmail-to-duckdb
+/dist/
+credentials.json
+*.token.json
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp
+*.duckdb.files
+.DS_Store

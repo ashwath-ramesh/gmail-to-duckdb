@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gmail to DuckDB</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <h1>Gmail to DuckDB</h1>
+    <nav>
+      <button type="button" id="tab-mail" class="active">Mail</button>
+      <button type="button" id="tab-stats">Stats</button>
+    </nav>
+  </header>
+  <main>
+    <section id="mail">
+      <form id="filters">
+        <input name="q" placeholder="Search">
+        <input name="from" placeholder="From email">
+        <input name="label" placeholder="Label id">
+        <label><input type="checkbox" name="unread"> Unread</label>
+        <button type="submit">Filter</button>
+      </form>
+      <div class="layout">
+        <div id="list"></div>
+        <article id="detail"><p>Select a message.</p></article>
+      </div>
+      <button type="button" id="more" hidden>More</button>
+    </section>
+    <section id="stats" hidden>
+      <p class="hint">Preloaded SQL. Ad-hoc queries open in the DuckDB UI.</p>
+      <p><button type="button" id="duck-ui">Open DuckDB UI</button></p>
+      <div id="cards"></div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
