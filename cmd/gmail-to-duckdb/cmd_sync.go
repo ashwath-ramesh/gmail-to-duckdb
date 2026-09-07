@@ -18,7 +18,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) error {
 	cf := globalFlags("sync")
 	full := cf.fs.Bool("full", false, "list mailbox and mark missing as deleted")
 	bodies := cf.fs.Bool("bodies", false, "fetch bodies for messages that lack them")
-	if err := cf.fs.Parse(args); err != nil {
+	if err := parseFlags(cf.fs, args); err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

@@ -24,7 +24,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	port := cf.fs.String("port", cfg.Port, "local port")
 	every := cf.fs.String("sync-every", "", "incremental sync interval (e.g. 5m)")
 	duckUI := cf.fs.Bool("duckdb-ui", false, "allow unauthenticated DuckDB UI on loopback")
-	if err := cf.fs.Parse(args); err != nil {
+	if err := parseFlags(cf.fs, args); err != nil {
 		return err
 	}
 	var interval time.Duration

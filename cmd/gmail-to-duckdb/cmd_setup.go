@@ -13,7 +13,7 @@ import (
 
 func cmdInit(args []string, stdout io.Writer) error {
 	cf := globalFlags("init")
-	if err := cf.fs.Parse(args); err != nil {
+	if err := parseFlags(cf.fs, args); err != nil {
 		return err
 	}
 	setup.PrintSteps(stdout)
@@ -44,7 +44,7 @@ func cmdDoctor(args []string, stdout io.Writer) error {
 	cf := globalFlags("doctor")
 	asJSON := cf.fs.Bool("json", false, "JSON envelope")
 	port := cf.fs.String("port", config.Load().Port, "UI port")
-	if err := cf.fs.Parse(args); err != nil {
+	if err := parseFlags(cf.fs, args); err != nil {
 		return err
 	}
 	cfg := config.Load()

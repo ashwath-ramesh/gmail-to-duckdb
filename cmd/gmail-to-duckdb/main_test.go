@@ -117,6 +117,21 @@ func TestStatusSearchGetSchema(t *testing.T) {
 	}
 }
 
+func TestSearchJSONAfterQuery(t *testing.T) {
+	dbPath := seedDB(t)
+	var out bytes.Buffer
+	if err := run([]string{"gmail-to-duckdb", "search", "--db", dbPath, "invoice", "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	var env query.Envelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("%v %s", err, out.String())
+	}
+	if env.ResultCount < 1 || len(env.Messages) == 0 {
+		t.Fatalf("%s", out.String())
+	}
+}
+
 func TestHelp(t *testing.T) {
 	var out bytes.Buffer
 	if err := run([]string{"gmail-to-duckdb", "help"}, strings.NewReader(""), &out, &out); err != nil {
