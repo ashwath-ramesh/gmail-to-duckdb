@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,10 @@ func TestIndexAndList(t *testing.T) {
 	if w.Code != 200 || len(w.Body.Bytes()) == 0 {
 		t.Fatalf("index %d", w.Code)
 	}
+	html := w.Body.String()
+	if !strings.Contains(html, "Search mail") || strings.Contains(html, "Label id") {
+		t.Fatalf("ui %s", html)
+	}
 	w = req(t, h, http.MethodGet, "/api/messages")
 	if w.Code != 200 {
 		t.Fatalf("list %d %s", w.Code, w.Body.String())
@@ -60,6 +65,31 @@ func TestIndexAndList(t *testing.T) {
 	}
 	if len(out.Messages) != 1 || out.Messages[0]["id"] != "m1" {
 		t.Fatalf("%s", w.Body.String())
+	}
+}
+
+func TestSearchQuery(t *testing.T) {
+	s, _ := testServer(t)
+	h := s.Handler()
+	w := req(t, h, http.MethodGet, "/api/messages?q=from:a@x.com")
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 1 || out.Messages[0]["id"] != "m1" {
+		t.Fatalf("%s", w.Body.String())
+	}
+	w = req(t, h, http.MethodGet, "/api/messages?q=from:nobody@x.com")
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 0 {
+		t.Fatalf("expected empty %s", w.Body.String())
 	}
 }
 

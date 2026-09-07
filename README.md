@@ -12,7 +12,7 @@ DuckDB makes analytics and search fast after sync. Browse mail in the local UI, 
 
 - Go CLI (one binary)
 - One `mail.duckdb` file
-- DuckDB FTS for subject and body
+- DuckDB FTS across people, subject, snippet, and body
 - Gmail History API and batch get
 - Metadata first. Bodies when you ask.
 
@@ -82,11 +82,24 @@ Flags:
 
 `ui` binds `127.0.0.1` only. The printed URL includes a session token. Mail lists metadata. Open a message and use Fetch body to pull one body from Gmail. The Stats page runs the bundled SQL files. Use Open DuckDB UI for ad-hoc SQL. Do not run `ui` on a shared host if other users can reach your loopback port.
 
+Mail search is one box. Type words. The index covers from, to, cc, subject, snippet, and body. Sync builds that index. Bodies are optional.
+
+Operators in the same box:
+
+- `from:bob`
+- `to:jane`
+- `subject:invoice`
+- `unread` or `is:unread`
+- `after:2024-01-01`
+- `before:2024-06-01`
+
+Use the Unread chip for the same unread filter. Results rank by relevance, then date.
+
 DuckDB allows one writer. Close `ui` before you run `sync` or `sql` on the same file.
 
 ## Schema
 
-`messages` stores typed columns: ids, timestamps, from, to, cc, subject, snippet, nullable body, labels, read/outgoing/deleted flags.
+`messages` stores typed columns: ids, timestamps, from, to, cc, subject, snippet, nullable body, labels, read/outgoing/deleted flags, and `search_text` for one-box search.
 
 `labels` maps Gmail label ids to names.
 

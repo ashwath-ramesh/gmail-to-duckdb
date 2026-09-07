@@ -3,27 +3,49 @@ const listEl = document.getElementById("list");
 const detailEl = document.getElementById("detail");
 const moreEl = document.getElementById("more");
 const cardsEl = document.getElementById("cards");
+const filters = document.getElementById("filters");
 let cursor = null;
+let offset = 0;
 let currentQuery = "";
+let debounceTimer = null;
+let abort = null;
 
 document.getElementById("tab-mail").onclick = () => show("mail");
 document.getElementById("tab-stats").onclick = () => {
   show("stats");
   loadStats();
 };
-document.getElementById("filters").onsubmit = (e) => {
+filters.onsubmit = (e) => {
   e.preventDefault();
-  cursor = null;
-  listEl.innerHTML = "";
+  clearTimeout(debounceTimer);
+  resetAndLoad();
+};
+filters.q.addEventListener("input", () => {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(resetAndLoad, 250);
+});
+filters.unread.onchange = resetAndLoad;
+moreEl.onclick = () => {
+  if (searchBox()) offset = listEl.querySelectorAll(".row").length;
   loadList();
 };
-moreEl.onclick = () => loadList();
 document.getElementById("duck-ui").onclick = async () => {
   const r = await api("/api/duckdb-ui", { method: "POST" });
   const j = await r.json();
   if (j.url) window.open(j.url, "_blank");
   else alert(j.error || "failed");
 };
+
+function searchBox() {
+  return filters.q.value.trim();
+}
+
+function resetAndLoad() {
+  cursor = null;
+  offset = 0;
+  listEl.innerHTML = "";
+  loadList();
+}
 
 function show(which) {
   document.getElementById("mail").hidden = which !== "mail";
@@ -33,13 +55,13 @@ function show(which) {
 }
 
 function qs() {
-  const f = document.getElementById("filters");
   const p = new URLSearchParams();
-  if (f.q.value) p.set("q", f.q.value);
-  if (f.from.value) p.set("from", f.from.value);
-  if (f.label.value) p.set("label", f.label.value);
-  if (f.unread.checked) p.set("unread", "1");
-  if (cursor) {
+  const q = searchBox();
+  if (q) p.set("q", q);
+  if (filters.unread.checked) p.set("unread", "1");
+  if (q) {
+    if (offset) p.set("offset", String(offset));
+  } else if (cursor) {
     p.set("after_date", cursor.internal_date);
     p.set("after_id", cursor.id);
   }
@@ -53,9 +75,32 @@ function api(path, opts) {
 }
 
 async function loadList() {
-  const r = await api("/api/messages?" + qs());
-  const j = await r.json();
-  for (const m of j.messages || []) {
+  if (abort) abort.abort();
+  abort = new AbortController();
+  const signal = abort.signal;
+  let j;
+  try {
+    const r = await api("/api/messages?" + qs(), { signal });
+    j = await r.json();
+    if (!r.ok) {
+      if (!listEl.querySelector(".row")) listEl.textContent = "Search failed.";
+      moreEl.hidden = true;
+      return;
+    }
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    if (!listEl.querySelector(".row")) listEl.textContent = "Search failed.";
+    moreEl.hidden = true;
+    return;
+  }
+  if (signal.aborted) return;
+  const msgs = j.messages || [];
+  if (msgs.length === 0) {
+    if (!listEl.querySelector(".row")) listEl.textContent = "No matches.";
+    moreEl.hidden = true;
+    return;
+  }
+  for (const m of msgs) {
     const b = document.createElement("button");
     b.className = "row";
     b.type = "button";
@@ -66,7 +111,7 @@ async function loadList() {
     listEl.appendChild(b);
     cursor = m;
   }
-  moreEl.hidden = !(j.messages && j.messages.length >= 50);
+  moreEl.hidden = msgs.length < 50;
 }
 
 async function openMsg(id, row) {

@@ -7,9 +7,25 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/search"
 	_ "github.com/duckdb/duckdb-go/v2"
 )
+
+const (
+	stateSearchText = "search_text_v1"
+	stateFTSIndex   = "fts_index"
+	ftsIndexVer     = "search_text"
+	maxLimit        = 100
+	maxOffset       = 5000
+	maxQueryRunes   = 200
+	likeEscape      = " ESCAPE '\\'"
+)
+
+type execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
 
 const schema = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -30,7 +46,8 @@ CREATE TABLE IF NOT EXISTS messages (
   is_outgoing BOOLEAN,
   is_deleted BOOLEAN DEFAULT false,
   has_body BOOLEAN DEFAULT false,
-  synced_at TIMESTAMP
+  synced_at TIMESTAMP,
+  search_text VARCHAR
 );
 CREATE INDEX IF NOT EXISTS messages_internal_date ON messages(internal_date);
 CREATE INDEX IF NOT EXISTS messages_from_email ON messages(from_email);
@@ -48,6 +65,15 @@ CREATE TABLE IF NOT EXISTS sync_state (
 CREATE TABLE IF NOT EXISTS sync_seen (
   id VARCHAR PRIMARY KEY
 );
+`
+
+const searchTextSQL = `trim(concat_ws(' ', from_name, from_email, array_to_string(to_emails, ' '), array_to_string(cc_emails, ' '), subject, snippet, body))`
+
+const messageSelect = `
+SELECT id, thread_id, history_id, internal_date,
+       from_name, from_email, to_json(to_emails)::VARCHAR, to_json(cc_emails)::VARCHAR,
+       subject, snippet, '', size_bytes, to_json(label_ids)::VARCHAR,
+       is_read, is_outgoing, is_deleted, has_body, synced_at
 `
 
 type Message struct {
@@ -87,6 +113,7 @@ type ListFilter struct {
 	AfterDate time.Time
 	AfterID   string
 	Limit     int
+	Offset    int
 }
 
 type SQLResult struct {
@@ -95,7 +122,8 @@ type SQLResult struct {
 }
 
 type DB struct {
-	sql *sql.DB
+	sql   *sql.DB
+	ftsOK bool
 }
 
 func Open(path string) (*DB, error) {
@@ -108,7 +136,27 @@ func Open(path string) (*DB, error) {
 		_ = sqldb.Close()
 		return nil, fmt.Errorf("schema: %w", err)
 	}
-	return &DB{sql: sqldb}, nil
+	db := &DB{sql: sqldb}
+	if err := db.migrateSearch(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func (d *DB) migrateSearch(ctx context.Context) error {
+	if _, err := d.sql.Exec(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS search_text VARCHAR`); err != nil {
+		return fmt.Errorf("search_text: %w", err)
+	}
+	if _, ok, err := d.GetState(ctx, stateSearchText); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	if _, err := d.sql.Exec(`UPDATE messages SET search_text = ` + searchTextSQL + ` WHERE search_text IS NULL OR search_text = ''`); err != nil {
+		return fmt.Errorf("search_text backfill: %w", err)
+	}
+	return d.SetState(ctx, stateSearchText, "1")
 }
 
 func (d *DB) Close() error {
@@ -166,6 +214,7 @@ ON CONFLICT (id) DO UPDATE SET
 	}
 	defer stmt.Close()
 
+	ids := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		var body any
 		if m.HasBody {
@@ -192,6 +241,10 @@ ON CONFLICT (id) DO UPDATE SET
 		if err != nil {
 			return err
 		}
+		ids = append(ids, m.ID)
+	}
+	if err := refreshSearchTextTx(ctx, tx, ids); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -229,22 +282,72 @@ func (d *DB) ListMessages(ctx context.Context, f ListFilter) ([]Message, error) 
 	if f.Limit <= 0 {
 		f.Limit = 50
 	}
+	if f.Limit > maxLimit {
+		f.Limit = maxLimit
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
+	if f.Offset > maxOffset {
+		f.Offset = maxOffset
+	}
+	if n := utf8.RuneCountInString(f.Query); n > maxQueryRunes {
+		f.Query = string([]rune(f.Query)[:maxQueryRunes])
+	}
+	q := search.Parse(f.Query)
+	if q.Unread {
+		f.Unread = true
+	}
+	if !q.After.IsZero() && f.After.IsZero() {
+		f.After = q.After
+	}
+	if !q.Before.IsZero() && f.Before.IsZero() {
+		f.Before = q.Before
+	}
+
+	hasFTS, err := d.hasFTS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	short := utf8.RuneCountInString(q.Text) < 2
+	if q.Text != "" && hasFTS {
+		msgs, err := d.listMessages(ctx, f, q, true)
+		if err != nil {
+			if short {
+				return nil, err
+			}
+		} else if len(msgs) > 0 || short {
+			return msgs, nil
+		}
+	}
+	return d.listMessages(ctx, f, q, false)
+}
+
+func (d *DB) listMessages(ctx context.Context, f ListFilter, q search.Query, useFTS bool) ([]Message, error) {
 	var b strings.Builder
-	args := make([]any, 0, 8)
-	b.WriteString(`
-SELECT id, thread_id, history_id, internal_date,
-       from_name, from_email, to_json(to_emails)::VARCHAR, to_json(cc_emails)::VARCHAR,
-       subject, snippet, '', size_bytes, to_json(label_ids)::VARCHAR,
-       is_read, is_outgoing, is_deleted, has_body, synced_at
-FROM messages
-WHERE NOT is_deleted
-`)
+	args := make([]any, 0, 16)
+	b.WriteString(messageSelect)
+	b.WriteString("FROM messages\nWHERE NOT is_deleted\n")
 	if f.Unread {
 		b.WriteString(" AND NOT is_read")
 	}
 	if f.From != "" {
 		b.WriteString(" AND from_email = ?")
 		args = append(args, f.From)
+	}
+	if q.From != "" {
+		b.WriteString(" AND (from_email ILIKE ?" + likeEscape + " OR from_name ILIKE ?" + likeEscape + ")")
+		pat := likeContains(q.From)
+		args = append(args, pat, pat)
+	}
+	if q.To != "" {
+		b.WriteString(" AND (array_to_string(to_emails, ' ') ILIKE ?" + likeEscape + " OR array_to_string(cc_emails, ' ') ILIKE ?" + likeEscape + ")")
+		pat := likeContains(q.To)
+		args = append(args, pat, pat)
+	}
+	if q.Subject != "" {
+		b.WriteString(" AND subject ILIKE ?" + likeEscape)
+		args = append(args, likeContains(q.Subject))
 	}
 	if f.Label != "" {
 		b.WriteString(" AND list_contains(label_ids, ?)")
@@ -258,26 +361,31 @@ WHERE NOT is_deleted
 		b.WriteString(" AND internal_date < ?")
 		args = append(args, f.Before.UTC())
 	}
-	if f.Query != "" {
-		ok, err := d.hasFTS(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
+	if q.Text != "" {
+		if useFTS {
 			b.WriteString(" AND fts_main_messages.match_bm25(id, ?) IS NOT NULL")
-			args = append(args, f.Query)
+			args = append(args, q.Text)
 		} else {
-			b.WriteString(" AND (subject ILIKE ? OR snippet ILIKE ?)")
-			like := "%" + f.Query + "%"
-			args = append(args, like, like)
+			b.WriteString(" AND search_text ILIKE ?" + likeEscape)
+			args = append(args, likeContains(q.Text))
 		}
 	}
-	if !f.AfterDate.IsZero() && f.AfterID != "" {
+	searchPage := f.Query != ""
+	if !searchPage && !f.AfterDate.IsZero() && f.AfterID != "" {
 		b.WriteString(" AND (internal_date < ? OR (internal_date = ? AND id < ?))")
 		args = append(args, f.AfterDate.UTC(), f.AfterDate.UTC(), f.AfterID)
 	}
-	b.WriteString(" ORDER BY internal_date DESC, id DESC LIMIT ?")
-	args = append(args, f.Limit)
+	if useFTS && q.Text != "" {
+		b.WriteString(" ORDER BY fts_main_messages.match_bm25(id, ?) DESC, internal_date DESC, id DESC LIMIT ?")
+		args = append(args, q.Text, f.Limit)
+	} else {
+		b.WriteString(" ORDER BY internal_date DESC, id DESC LIMIT ?")
+		args = append(args, f.Limit)
+	}
+	if searchPage && f.Offset > 0 {
+		b.WriteString(" OFFSET ?")
+		args = append(args, f.Offset)
+	}
 
 	rows, err := d.sql.QueryContext(ctx, b.String(), args...)
 	if err != nil {
@@ -368,7 +476,10 @@ func (d *DB) UpdateBody(ctx context.Context, id, body string) error {
 	_, err := d.sql.ExecContext(ctx, `
 UPDATE messages SET body = ?, has_body = true, synced_at = ? WHERE id = ?
 `, body, time.Now().UTC(), id)
-	return err
+	if err != nil {
+		return err
+	}
+	return refreshSearchTextTx(ctx, d.sql, []string{id})
 }
 
 func (d *DB) IDsWithoutBody(ctx context.Context, limit int) ([]string, error) {
@@ -491,12 +602,65 @@ func (d *DB) RebuildFTS(ctx context.Context) error {
 		return fmt.Errorf("load fts: %w", err)
 	}
 	_, err = d.sql.ExecContext(ctx, `
-PRAGMA create_fts_index('messages', 'id', 'subject', 'body', overwrite=1)
+PRAGMA create_fts_index('messages', 'id', 'search_text', overwrite=1)
 `)
+	if err != nil {
+		return err
+	}
+	if err := d.SetState(ctx, stateFTSIndex, ftsIndexVer); err != nil {
+		return err
+	}
+	d.ftsOK = true
+	return nil
+}
+
+func (d *DB) EnsureFTS(ctx context.Context) error {
+	ok, err := d.hasFTS(ctx)
+	if err != nil {
+		return err
+	}
+	ver, _, err := d.GetState(ctx, stateFTSIndex)
+	if err != nil {
+		return err
+	}
+	if ok && ver == ftsIndexVer {
+		return nil
+	}
+	return d.RebuildFTS(ctx)
+}
+
+func likeContains(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return "%" + s + "%"
+}
+
+func refreshSearchTextTx(ctx context.Context, ex execer, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("UPDATE messages SET search_text = ")
+	b.WriteString(searchTextSQL)
+	b.WriteString(" WHERE id IN (")
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('?')
+		args[i] = id
+	}
+	b.WriteByte(')')
+	_, err := ex.ExecContext(ctx, b.String(), args...)
 	return err
 }
 
 func (d *DB) hasFTS(ctx context.Context) (bool, error) {
+	if d.ftsOK {
+		return true, nil
+	}
 	var n int
 	err := d.sql.QueryRowContext(ctx, `
 SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'fts_main_messages'
@@ -504,7 +668,15 @@ SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'fts_main_messages'
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	ver, _, err := d.GetState(ctx, stateFTSIndex)
+	if err != nil {
+		return false, err
+	}
+	ok := n > 0 && ver == ftsIndexVer
+	if ok {
+		d.ftsOK = true
+	}
+	return ok, nil
 }
 
 func (d *DB) ExecSQL(ctx context.Context, query string) (SQLResult, error) {

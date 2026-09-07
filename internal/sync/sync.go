@@ -25,9 +25,10 @@ type Options struct {
 }
 
 type Runner struct {
-	DB  *store.DB
-	API gmail.API
-	Log func(string, ...any)
+	DB    *store.DB
+	API   gmail.API
+	Log   func(string, ...any)
+	wrote bool
 }
 
 func (r *Runner) logf(format string, args ...any) {
@@ -37,6 +38,7 @@ func (r *Runner) logf(format string, args ...any) {
 }
 
 func (r *Runner) Sync(ctx context.Context, opt Options) error {
+	r.wrote = false
 	profile, err := r.API.Profile(ctx)
 	if err != nil {
 		return fmt.Errorf("profile: %w", err)
@@ -95,6 +97,12 @@ func (r *Runner) Sync(ctx context.Context, opt Options) error {
 
 	if opt.Bodies {
 		if err := r.bodies(ctx, profile.Email); err != nil {
+			return err
+		}
+	}
+	if r.wrote {
+		r.logf("rebuilding fts")
+		if err := r.DB.RebuildFTS(ctx); err != nil {
 			return err
 		}
 	}
@@ -227,7 +235,6 @@ func (r *Runner) incremental(ctx context.Context, start uint64) error {
 }
 
 func (r *Runner) bodies(ctx context.Context, email string) error {
-	wrote := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -237,20 +244,12 @@ func (r *Runner) bodies(ctx context.Context, email string) error {
 			return err
 		}
 		if len(ids) == 0 {
-			break
+			return nil
 		}
 		if err := r.ingest(ctx, ids, "full", email); err != nil {
 			return err
 		}
-		wrote = true
 	}
-	if wrote {
-		r.logf("rebuilding fts")
-		if err := r.DB.RebuildFTS(ctx); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (r *Runner) ingest(ctx context.Context, ids []string, format, email string) error {
@@ -272,6 +271,9 @@ func (r *Runner) ingest(ctx context.Context, ids []string, format, email string)
 	}
 	if err := r.DB.UpsertMessages(ctx, msgs); err != nil {
 		return err
+	}
+	if len(msgs) > 0 {
+		r.wrote = true
 	}
 	r.logf("upserted %d %s messages", len(msgs), format)
 	return nil

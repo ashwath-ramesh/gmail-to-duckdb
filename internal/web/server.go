@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,10 +95,19 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		Query:  q.Get("q"),
 		Limit:  50,
 	}
-	if v := q.Get("after_date"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			f.AfterDate = t
-			f.AfterID = q.Get("after_id")
+	if q.Get("q") == "" {
+		if v := q.Get("after_date"); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				f.AfterDate = t
+				f.AfterID = q.Get("after_id")
+			}
+		}
+	} else if v := q.Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > 5000 {
+				n = 5000
+			}
+			f.Offset = n
 		}
 	}
 	msgs, err := s.DB.ListMessages(r.Context(), f)

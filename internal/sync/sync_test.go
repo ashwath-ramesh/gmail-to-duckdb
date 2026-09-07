@@ -176,6 +176,23 @@ func TestFirstSyncLoadsPages(t *testing.T) {
 	}
 }
 
+func TestSyncBuildsFTS(t *testing.T) {
+	ctx := context.Background()
+	db, r, api := openTest(t)
+	api.listPages = [][]string{{"a"}}
+	api.raw["a"] = rawMsg("a", "a@x.com", "Pineapple invoice", true, "")
+	if err := r.Sync(ctx, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := db.ListMessages(ctx, store.ListFilter{Limit: 10, Query: "pineapple"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].ID != "a" {
+		t.Fatalf("fts after sync: %#v", hits)
+	}
+}
+
 func TestFullMarksDeleted(t *testing.T) {
 	ctx := context.Background()
 	db, r, api := openTest(t)

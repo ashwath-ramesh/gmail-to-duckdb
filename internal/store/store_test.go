@@ -247,12 +247,189 @@ func TestBodyAndIDsWithoutBody(t *testing.T) {
 	if !got.HasBody || got.Body != "the body" {
 		t.Fatalf("body: %+v", got)
 	}
+	hits, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "the body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].ID != "m1" {
+		t.Fatalf("body search: %d", len(hits))
+	}
 	ids, err = db.IDsWithoutBody(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ids) != 0 {
 		t.Fatalf("expected empty, got %#v", ids)
+	}
+}
+
+func TestSearchTextWithoutBody(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	msg := sample("m1", at)
+	msg.FromName = "Zelda"
+	msg.FromEmail = "zelda@example.com"
+	msg.ToEmails = []string{"link@hyrule.test"}
+	msg.Subject = "master sword invoice"
+	if err := db.UpsertMessages(ctx, []Message{msg}); err != nil {
+		t.Fatal(err)
+	}
+
+	byName, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "Zelda"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byName) != 1 || byName[0].ID != "m1" {
+		t.Fatalf("name: %#v", ids(byName))
+	}
+
+	byTo, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "link@hyrule.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byTo) != 1 || byTo[0].ID != "m1" {
+		t.Fatalf("to: %#v", ids(byTo))
+	}
+
+	bySub, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "invoice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bySub) != 1 || bySub[0].ID != "m1" {
+		t.Fatalf("subject: %#v", ids(bySub))
+	}
+}
+
+func TestSearchOperatorsAndOffset(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	t1 := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC)
+	a := sample("a", t1)
+	a.FromEmail = "ann@x.com"
+	a.FromName = "Ann"
+	a.IsRead = false
+	b := sample("b", t2)
+	b.FromEmail = "bob@x.com"
+	b.FromName = "Bob"
+	b.IsRead = true
+	if err := db.UpsertMessages(ctx, []Message{a, b}); err != nil {
+		t.Fatal(err)
+	}
+
+	from, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "from:ann"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(from) != 1 || from[0].ID != "a" {
+		t.Fatalf("from: %#v", ids(from))
+	}
+
+	unread, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "unread"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unread) != 1 || unread[0].ID != "a" {
+		t.Fatalf("unread: %#v", ids(unread))
+	}
+
+	after, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "after:2024-02-15"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 || after[0].ID != "b" {
+		t.Fatalf("after: %#v", ids(after))
+	}
+
+	page, err := db.ListMessages(ctx, ListFilter{Limit: 1, Query: "from:@x.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || page[0].ID != "b" {
+		t.Fatalf("page: %#v", ids(page))
+	}
+	next, err := db.ListMessages(ctx, ListFilter{Limit: 1, Offset: 1, Query: "from:@x.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next) != 1 || next[0].ID != "a" {
+		t.Fatalf("offset: %#v", ids(next))
+	}
+}
+
+func TestSearchFTSRankAndFallback(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	weak := sample("weak", at)
+	weak.Subject = "pineapple note"
+	strong := sample("strong", at.Add(time.Hour))
+	strong.Subject = "pineapple pineapple pineapple"
+	if err := db.UpsertMessages(ctx, []Message{weak, strong}); err != nil {
+		t.Fatal(err)
+	}
+
+	fallback, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "pineapple"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fallback) != 2 {
+		t.Fatalf("fallback: %#v", ids(fallback))
+	}
+
+	if err := db.RebuildFTS(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "pineapple"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 || hits[0].ID != "strong" {
+		t.Fatalf("rank: %#v", ids(hits))
+	}
+}
+
+func TestEnsureFTS(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	ok, err := db.hasFTS(ctx)
+	if err != nil || ok {
+		t.Fatalf("fts before %v %v", ok, err)
+	}
+	if err := db.EnsureFTS(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = db.hasFTS(ctx)
+	if err != nil || !ok {
+		t.Fatalf("fts after %v %v", ok, err)
+	}
+	if err := db.SetState(ctx, stateFTSIndex, "old"); err != nil {
+		t.Fatal(err)
+	}
+	db.ftsOK = false
+	if err := db.EnsureFTS(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ver, has, err := db.GetState(ctx, stateFTSIndex)
+	if err != nil || !has || ver != ftsIndexVer {
+		t.Fatalf("ver %q %v %v", ver, has, err)
+	}
+}
+
+func TestLikeWildcardsAreLiteral(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := db.UpsertMessages(ctx, []Message{sample("a", at), sample("b", at.Add(time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "from:%"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("wildcard: %#v", ids(hits))
 	}
 }
 

@@ -139,6 +139,10 @@ func cmdUI(args []string, stdout, stderr io.Writer) error {
 	}
 	defer db.Close()
 
+	if err := db.EnsureFTS(ctx); err != nil {
+		fmt.Fprintln(stderr, "fts:", err)
+	}
+
 	s := &web.Server{DB: db, Token: web.NewToken()}
 	if hc, err := auth.HTTPClient(ctx, *creds, auth.TokenPath(*dbPath), *oauthPort); err == nil {
 		if api, err := gmail.New(ctx, hc); err == nil {
