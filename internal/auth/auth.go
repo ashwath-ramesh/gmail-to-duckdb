@@ -9,11 +9,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/openurl"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	gmailapi "google.golang.org/api/gmail/v1"
@@ -196,5 +196,5 @@ func cloneConfig(cfg *oauth2.Config) *oauth2.Config {
 }
 
 func openBrowser(url string) error {
-	return exec.Command("xdg-open", url).Start()
+	return openurl.Open(url)
 }

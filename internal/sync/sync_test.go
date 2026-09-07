@@ -268,6 +268,10 @@ func TestHistoryAddDeleteLabel(t *testing.T) {
 	if hid != "20" {
 		t.Fatalf("hid %s", hid)
 	}
+	okAt, ok, err := db.GetState(ctx, store.StateLastSyncOK)
+	if err != nil || !ok || okAt == "" {
+		t.Fatalf("last_sync_ok %q %v %v", okAt, ok, err)
+	}
 }
 
 func TestStaleHistoryFallsBackToFull(t *testing.T) {
@@ -329,6 +333,13 @@ func TestHistoryIDSetBeforeBodiesFail(t *testing.T) {
 	hid, ok, err := db.GetState(ctx, stateHistoryID)
 	if err != nil || !ok || hid != "100" {
 		t.Fatalf("history %q %v %v", hid, ok, err)
+	}
+	if _, ok, err := db.GetState(ctx, store.StateLastSyncOK); err != nil || ok {
+		t.Fatal("last_sync_ok should be unset")
+	}
+	msg, ok, err := db.GetState(ctx, store.StateLastSyncError)
+	if err != nil || !ok || msg == "" {
+		t.Fatalf("last_sync_error %q %v %v", msg, ok, err)
 	}
 }
 

@@ -1,4 +1,3 @@
-const token = new URLSearchParams(location.search).get("t") || "";
 const listEl = document.getElementById("list");
 const detailEl = document.getElementById("detail");
 const moreEl = document.getElementById("more");
@@ -29,6 +28,17 @@ moreEl.onclick = () => {
   if (searchBox()) offset = listEl.querySelectorAll(".row").length;
   loadList();
 };
+document.getElementById("sync-now").onclick = async () => {
+  const btn = document.getElementById("sync-now");
+  btn.disabled = true;
+  const r = await api("/api/sync", { method: "POST", body: "{}" });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    alert(j.error || "sync failed");
+  }
+  loadStatus();
+};
+
 document.getElementById("duck-ui").onclick = async () => {
   const r = await api("/api/duckdb-ui", { method: "POST" });
   const j = await r.json();
@@ -70,8 +80,7 @@ function qs() {
 
 function api(path, opts) {
   const u = new URL(path, location.origin);
-  if (token) u.searchParams.set("t", token);
-  return fetch(u, opts);
+  return fetch(u, { credentials: "same-origin", ...opts });
 }
 
 async function loadList() {
@@ -117,8 +126,9 @@ async function loadList() {
 async function openMsg(id, row) {
   for (const el of listEl.querySelectorAll(".row")) el.classList.remove("active");
   if (row) row.classList.add("active");
-  const r = await api("/api/messages/" + encodeURIComponent(id));
-  const m = await r.json();
+  const r = await api("/api/messages/" + encodeURIComponent(id) + "?body=1");
+  const j = await r.json();
+  const m = j.message || j;
   detailEl.innerHTML = "";
   const meta = document.createElement("div");
   meta.className = "meta";
@@ -189,4 +199,34 @@ function table(t) {
   return el;
 }
 
+async function loadStatus() {
+  const el = document.getElementById("sync-status");
+  const btn = document.getElementById("sync-now");
+  try {
+    const r = await api("/api/status");
+    const s = await r.json();
+    if (!r.ok) {
+      el.textContent = s.error || "status failed";
+      return;
+    }
+    const parts = [];
+    if (s.last_sync) parts.push("last " + s.last_sync);
+    if (s.phase) parts.push(s.phase);
+    if (s.processed) parts.push(s.processed + " msgs");
+    if (s.body_coverage) {
+      parts.push("search " + (s.body_coverage.search_covers || "metadata"));
+      parts.push(s.body_coverage.with_body + "/" + s.body_coverage.total + " bodies");
+    }
+    if (s.last_error) parts.push("error: " + s.last_error);
+    el.textContent = parts.join(" · ") || "ready";
+    const busy = s.phase && s.phase !== "idle";
+    btn.disabled = busy;
+    document.getElementById("duck-ui").hidden = !s.duckdb_ui;
+  } catch (err) {
+    el.textContent = "status unavailable";
+  }
+}
+
 loadList();
+loadStatus();
+setInterval(loadStatus, 2000);

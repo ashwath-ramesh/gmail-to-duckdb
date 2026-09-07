@@ -2,6 +2,7 @@
 /dist/
 credentials.json
 *.token.json
+*.serve.json
 *.duckdb
 *.duckdb.wal
 *.duckdb.tmp

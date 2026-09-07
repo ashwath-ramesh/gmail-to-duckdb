@@ -14,6 +14,11 @@ import (
 )
 
 const (
+	SchemaVersion      = 1
+	StateSchemaVersion = "schema_version"
+	StateLastSyncOK    = "last_sync_ok"
+	StateLastSyncError = "last_sync_error"
+
 	stateSearchText = "search_text_v1"
 	stateFTSIndex   = "fts_index"
 	ftsIndexVer     = "search_text"
@@ -117,8 +122,24 @@ type ListFilter struct {
 }
 
 type SQLResult struct {
-	Columns []string   `json:"columns"`
-	Rows    [][]string `json:"rows"`
+	Columns     []string `json:"columns"`
+	ColumnTypes []string `json:"column_types,omitempty"`
+	Rows        [][]any  `json:"rows"`
+}
+
+type Coverage struct {
+	WithBody int
+	Total    int
+}
+
+func (c Coverage) SearchCovers() string {
+	if c.Total == 0 || c.WithBody == 0 {
+		return "metadata"
+	}
+	if c.WithBody == c.Total {
+		return "bodies"
+	}
+	return "mixed"
 }
 
 type DB struct {
@@ -137,11 +158,27 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("schema: %w", err)
 	}
 	db := &DB{sql: sqldb}
-	if err := db.migrateSearch(context.Background()); err != nil {
+	ctx := context.Background()
+	if err := db.migrateSearch(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := db.ensureSchemaVersion(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
+}
+
+func (d *DB) ensureSchemaVersion(ctx context.Context) error {
+	_, ok, err := d.GetState(ctx, StateSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	return d.SetState(ctx, StateSchemaVersion, fmt.Sprintf("%d", SchemaVersion))
 }
 
 func (d *DB) migrateSearch(ctx context.Context) error {
@@ -679,33 +716,17 @@ SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'fts_main_messages'
 	return ok, nil
 }
 
-func (d *DB) ExecSQL(ctx context.Context, query string) (SQLResult, error) {
-	rows, err := d.sql.QueryContext(ctx, query)
-	if err != nil {
-		return SQLResult{}, err
-	}
-	defer rows.Close()
-	cols, err := rows.Columns()
-	if err != nil {
-		return SQLResult{}, err
-	}
-	res := SQLResult{Columns: cols, Rows: [][]string{}}
-	for rows.Next() {
-		raw := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range raw {
-			ptrs[i] = &raw[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return SQLResult{}, err
-		}
-		line := make([]string, len(cols))
-		for i, v := range raw {
-			line[i] = fmt.Sprint(deref(v))
-		}
-		res.Rows = append(res.Rows, line)
-	}
-	return res, rows.Err()
+func (d *DB) HasFTS(ctx context.Context) (bool, error) {
+	return d.hasFTS(ctx)
+}
+
+func (d *DB) Coverage(ctx context.Context) (Coverage, error) {
+	var c Coverage
+	err := d.sql.QueryRowContext(ctx, `
+SELECT coalesce(sum(CASE WHEN has_body THEN 1 ELSE 0 END), 0), count(*)
+FROM messages WHERE NOT is_deleted
+`).Scan(&c.WithBody, &c.Total)
+	return c, err
 }
 
 func scanMessages(rows *sql.Rows) ([]Message, error) {
@@ -753,18 +774,4 @@ func decodeList(s string) []string {
 		return []string{}
 	}
 	return out
-}
-
-func deref(v any) any {
-	if v == nil {
-		return ""
-	}
-	switch t := v.(type) {
-	case []byte:
-		return string(t)
-	case time.Time:
-		return t.UTC().Format(time.RFC3339)
-	default:
-		return t
-	}
 }

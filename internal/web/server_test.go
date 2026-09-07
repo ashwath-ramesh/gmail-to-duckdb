@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
+	mailsync "github.com/ashwath-ramesh/gmail-to-duckdb/internal/sync"
 )
 
 func testServer(t *testing.T) (*Server, *store.DB) {
@@ -27,7 +29,7 @@ func testServer(t *testing.T) (*Server, *store.DB) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{DB: db, FetchBody: func(ctx context.Context, id string) (string, error) {
+	s := &Server{DB: db, Token: "test", FetchBody: func(ctx context.Context, id string) (string, error) {
 		return "fetched body", nil
 	}}
 	return s, db
@@ -37,6 +39,7 @@ func req(t *testing.T, h http.Handler, method, path string) *httptest.ResponseRe
 	t.Helper()
 	r := httptest.NewRequest(method, path, nil)
 	r.RemoteAddr = "127.0.0.1:1234"
+	r.Header.Set("X-Token", "test")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w
@@ -115,18 +118,20 @@ func TestHTMLBodySanitized(t *testing.T) {
 	if err := db.UpdateBody(context.Background(), "m1", `<p>Hi<script>alert(1)</script></p>`); err != nil {
 		t.Fatal(err)
 	}
-	w := req(t, s.Handler(), http.MethodGet, "/api/messages/m1")
+	w := req(t, s.Handler(), http.MethodGet, "/api/messages/m1?body=1")
 	if w.Code != 200 {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	var got map[string]any
+	var got struct {
+		Message map[string]any `json:"message"`
+	}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got["is_html"] != true {
-		t.Fatalf("is_html %#v", got["is_html"])
+	if got.Message["is_html"] != true {
+		t.Fatalf("is_html %#v", got.Message["is_html"])
 	}
-	body, _ := got["body"].(string)
+	body, _ := got.Message["body"].(string)
 	if !strings.Contains(body, "Hi") || strings.Contains(strings.ToLower(body), "script") {
 		t.Fatalf("body %q", body)
 	}
@@ -171,8 +176,8 @@ func TestStats(t *testing.T) {
 		t.Fatalf("stat %d %s", w.Code, w.Body.String())
 	}
 	var table struct {
-		Columns []string   `json:"columns"`
-		Rows    [][]string `json:"rows"`
+		Columns []string `json:"columns"`
+		Rows    [][]any  `json:"rows"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &table); err != nil {
 		t.Fatal(err)
@@ -207,9 +212,92 @@ func TestAPIRequiresToken(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("code %d", w.Code)
 	}
-	w = req(t, h, http.MethodGet, "/api/messages?t=secret")
+	r := httptest.NewRequest(http.MethodGet, "/api/messages?t=secret", nil)
+	r.RemoteAddr = "127.0.0.1:1"
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("query token must not work %d", w.Code)
+	}
+	r = httptest.NewRequest(http.MethodGet, "/api/messages", nil)
+	r.RemoteAddr = "127.0.0.1:1"
+	r.Header.Set("X-Token", "secret")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
 	if w.Code != 200 {
-		t.Fatalf("token query %d %s", w.Code, w.Body.String())
+		t.Fatalf("header token %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestEmptyTokenDeniesAPI(t *testing.T) {
+	s, _ := testServer(t)
+	s.Token = ""
+	w := req(t, s.Handler(), http.MethodGet, "/api/messages")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("code %d", w.Code)
+	}
+}
+
+func TestSessionCookie(t *testing.T) {
+	s, _ := testServer(t)
+	w := req(t, s.Handler(), http.MethodGet, "/")
+	if !strings.Contains(w.Header().Get("Set-Cookie"), "session=test") {
+		t.Fatalf("cookie %q", w.Header().Get("Set-Cookie"))
+	}
+}
+
+func TestDuckUIDisabled(t *testing.T) {
+	s, _ := testServer(t)
+	w := req(t, s.Handler(), http.MethodPost, "/api/duckdb-ui")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("code %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestStatusSchemaSQL(t *testing.T) {
+	s, _ := testServer(t)
+	h := s.Handler()
+	w := req(t, h, http.MethodGet, "/api/status")
+	if w.Code != 200 {
+		t.Fatalf("status %d %s", w.Code, w.Body.String())
+	}
+	var env query.Envelope
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.SchemaVersion != 1 || env.Phase != "idle" {
+		t.Fatalf("%+v", env)
+	}
+	w = req(t, h, http.MethodGet, "/api/schema")
+	if w.Code != 200 {
+		t.Fatalf("schema %d %s", w.Code, w.Body.String())
+	}
+	body := strings.NewReader(`{"query":"SELECT 1 AS n"}`)
+	r := httptest.NewRequest(http.MethodPost, "/api/sql", body)
+	r.RemoteAddr = "127.0.0.1:1"
+	r.Header.Set("X-Token", "test")
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, r)
+	if rw.Code != 200 {
+		t.Fatalf("sql %d %s", rw.Code, rw.Body.String())
+	}
+}
+
+func TestSyncNow(t *testing.T) {
+	s, _ := testServer(t)
+	called := false
+	s.Sync = func(ctx context.Context, opt mailsync.Options) error {
+		called = true
+		return nil
+	}
+	body := strings.NewReader(`{"wait":true}`)
+	r := httptest.NewRequest(http.MethodPost, "/api/sync", body)
+	r.RemoteAddr = "127.0.0.1:1"
+	r.Header.Set("X-Token", "test")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != 200 || !called {
+		t.Fatalf("sync %d %s called=%v", w.Code, w.Body.String(), called)
 	}
 }
 

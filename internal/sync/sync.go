@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/gmail"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/parse"
@@ -24,11 +25,19 @@ type Options struct {
 	Bodies bool
 }
 
+type Progress struct {
+	Phase     string
+	Processed int
+}
+
 type Runner struct {
-	DB    *store.DB
-	API   gmail.API
-	Log   func(string, ...any)
-	wrote bool
+	DB         *store.DB
+	API        gmail.API
+	Log        func(string, ...any)
+	OnProgress func(Progress)
+	wrote      bool
+	processed  int
+	phase      string
 }
 
 func (r *Runner) logf(format string, args ...any) {
@@ -37,8 +46,33 @@ func (r *Runner) logf(format string, args ...any) {
 	}
 }
 
+func (r *Runner) progress(phase string) {
+	r.phase = phase
+	if r.OnProgress != nil {
+		r.OnProgress(Progress{Phase: phase, Processed: r.processed})
+	}
+}
+
+func (r *Runner) finish(ctx context.Context, err error) error {
+	write := context.WithoutCancel(ctx)
+	if err != nil {
+		_ = r.DB.SetState(write, store.StateLastSyncError, err.Error())
+		return err
+	}
+	_ = r.DB.ClearState(write, store.StateLastSyncError)
+	_ = r.DB.SetState(write, store.StateLastSyncOK, time.Now().UTC().Format(time.RFC3339))
+	r.progress("idle")
+	return nil
+}
+
 func (r *Runner) Sync(ctx context.Context, opt Options) error {
+	return r.finish(ctx, r.sync(ctx, opt))
+}
+
+func (r *Runner) sync(ctx context.Context, opt Options) error {
 	r.wrote = false
+	r.processed = 0
+	r.progress("profile")
 	profile, err := r.API.Profile(ctx)
 	if err != nil {
 		return fmt.Errorf("profile: %w", err)
@@ -46,6 +80,7 @@ func (r *Runner) Sync(ctx context.Context, opt Options) error {
 	if err := r.DB.SetState(ctx, stateProfile, profile.Email); err != nil {
 		return err
 	}
+	r.progress("labels")
 	labels, err := r.API.Labels(ctx)
 	if err != nil {
 		return fmt.Errorf("labels: %w", err)
@@ -101,6 +136,7 @@ func (r *Runner) Sync(ctx context.Context, opt Options) error {
 		}
 	}
 	if r.wrote {
+		r.progress("fts")
 		r.logf("rebuilding fts")
 		if err := r.DB.RebuildFTS(ctx); err != nil {
 			return err
@@ -141,6 +177,7 @@ func (r *Runner) full(ctx context.Context, markDeleted bool) error {
 		pageTok = ""
 	}
 	email, _, _ := r.DB.GetState(ctx, stateProfile)
+	r.progress("list")
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -190,6 +227,7 @@ func (r *Runner) incremental(ctx context.Context, start uint64) error {
 		}
 	}
 	email, _, _ := r.DB.GetState(ctx, stateProfile)
+	r.progress("history")
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -235,6 +273,7 @@ func (r *Runner) incremental(ctx context.Context, start uint64) error {
 }
 
 func (r *Runner) bodies(ctx context.Context, email string) error {
+	r.progress("bodies")
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -274,6 +313,8 @@ func (r *Runner) ingest(ctx context.Context, ids []string, format, email string)
 	}
 	if len(msgs) > 0 {
 		r.wrote = true
+		r.processed += len(msgs)
+		r.progress(r.phase)
 	}
 	r.logf("upserted %d %s messages", len(msgs), format)
 	return nil

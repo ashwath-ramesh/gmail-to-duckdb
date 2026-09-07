@@ -3,6 +3,8 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -10,15 +12,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/htmlutil"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/stats"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
+	mailsync "github.com/ashwath-ramesh/gmail-to-duckdb/internal/sync"
 )
 
 type Server struct {
-	DB        *store.DB
-	Token     string
-	FetchBody func(ctx context.Context, id string) (string, error)
+	DB          *store.DB
+	Token       string
+	FetchBody   func(ctx context.Context, id string) (string, error)
+	Sync        func(ctx context.Context, opt mailsync.Options) error
+	SyncCtx     context.Context
+	AllowDuckUI bool
+	rt          runtime
 }
 
 func (s *Server) Handler() http.Handler {
@@ -32,6 +39,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stats", s.listStats)
 	mux.HandleFunc("GET /api/stats/{name}", s.stat)
 	mux.HandleFunc("POST /api/duckdb-ui", s.duckUI)
+	mux.HandleFunc("GET /api/status", s.status)
+	mux.HandleFunc("GET /api/schema", s.schema)
+	mux.HandleFunc("POST /api/sql", s.sql)
+	mux.HandleFunc("POST /api/sync", s.syncNow)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -49,30 +60,38 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) validToken(r *http.Request) bool {
 	if s.Token == "" {
-		return true
+		return false
 	}
 	if r.Header.Get("X-Token") == s.Token {
 		return true
 	}
-	return r.URL.Query().Get("t") == s.Token
+	c, err := r.Cookie("session")
+	return err == nil && c.Value == s.Token
 }
 
-func ListenAndServe(ctx context.Context, port string, h http.Handler) error {
-	addr := net.JoinHostPort("127.0.0.1", port)
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
+func Listen(port string) (net.Listener, error) {
+	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", port))
+}
+
+func Serve(ctx context.Context, ln net.Listener, h http.Handler) error {
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())
 	}()
-	err = srv.Serve(ln)
+	err := srv.Serve(ln)
 	if err == http.ErrServerClosed {
 		return nil
 	}
 	return err
+}
+
+func ListenAndServe(ctx context.Context, port string, h http.Handler) error {
+	ln, err := Listen(port)
+	if err != nil {
+		return err
+	}
+	return Serve(ctx, ln, h)
 }
 
 func Addr(port string) string {
@@ -84,6 +103,15 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if s.Token != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "session",
+			Value:    s.Token,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+		})
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(b)
@@ -118,16 +146,110 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"messages": msgsJSON(msgs)})
+	env, err := query.Status(r.Context(), s.DB)
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	out := make([]query.Message, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, query.MessageFromStore(m, false))
+	}
+	env.Messages = out
+	if env.Messages == nil {
+		env.Messages = []query.Message{}
+	}
+	env.ResultCount = len(out)
+	env.Truncated = len(out) == f.Limit
+	query.MarkMailUntrusted(&env)
+	writeJSON(w, env)
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
-	msg, err := s.DB.GetMessage(r.Context(), r.PathValue("id"))
+	includeBody := r.URL.Query().Get("body") == "1"
+	env, err := query.Get(r.Context(), s.DB, r.PathValue("id"), includeBody)
 	if err != nil {
 		writeErr(w, err, http.StatusNotFound)
 		return
 	}
-	writeJSON(w, msgJSON(msg))
+	writeJSON(w, env)
+}
+
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	env, err := s.liveStatus(r.Context())
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, env)
+}
+
+func (s *Server) schema(w http.ResponseWriter, r *http.Request) {
+	env, err := query.SchemaInfo(r.Context(), s.DB)
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, env)
+}
+
+func (s *Server) sql(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Query string `json:"query"`
+		Write bool   `json:"write"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeErr(w, err, http.StatusBadRequest)
+		return
+	}
+	env, err := query.SQL(r.Context(), s.DB, req.Query, req.Write)
+	if err != nil {
+		writeErr(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, env)
+}
+
+func (s *Server) syncNow(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Full   bool `json:"full"`
+		Bodies bool `json:"bodies"`
+		Wait   bool `json:"wait"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, err, http.StatusBadRequest)
+			return
+		}
+	}
+	opt := mailsync.Options{Full: req.Full, Bodies: req.Bodies}
+	if req.Wait {
+		if err := s.WaitSync(r.Context(), opt); err != nil {
+			code := http.StatusBadRequest
+			if errors.Is(err, errSyncBusy) {
+				code = http.StatusConflict
+			} else if !errors.Is(err, errNoSync) {
+				code = http.StatusBadGateway
+			}
+			writeErr(w, err, code)
+			return
+		}
+	} else {
+		if err := s.StartSync(s.syncContext(), opt); err != nil {
+			code := http.StatusBadRequest
+			if errors.Is(err, errSyncBusy) {
+				code = http.StatusConflict
+			}
+			writeErr(w, err, code)
+			return
+		}
+	}
+	env, err := s.liveStatus(r.Context())
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, env)
 }
 
 func (s *Server) body(w http.ResponseWriter, r *http.Request) {
@@ -180,44 +302,16 @@ func (s *Server) stat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) duckUI(w http.ResponseWriter, r *http.Request) {
+	if !s.AllowDuckUI {
+		writeErr(w, errNoDuckUI, http.StatusBadRequest)
+		return
+	}
 	_, err := s.DB.SQL().ExecContext(r.Context(), "CALL start_ui()")
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]string{"url": "http://127.0.0.1:4213"})
-}
-
-func msgsJSON(msgs []store.Message) []map[string]any {
-	out := make([]map[string]any, 0, len(msgs))
-	for _, m := range msgs {
-		out = append(out, msgJSON(m))
-	}
-	return out
-}
-
-func msgJSON(m store.Message) map[string]any {
-	body := m.Body
-	isHTML := htmlutil.LooksLikeHTML(body)
-	if isHTML {
-		body = htmlutil.Sanitize(body)
-	}
-	return map[string]any{
-		"id":            m.ID,
-		"thread_id":     m.ThreadID,
-		"internal_date": m.InternalDate.UTC().Format(time.RFC3339),
-		"from_name":     m.FromName,
-		"from_email":    m.FromEmail,
-		"to_emails":     m.ToEmails,
-		"subject":       m.Subject,
-		"snippet":       m.Snippet,
-		"body":          body,
-		"label_ids":     m.LabelIDs,
-		"is_read":       m.IsRead,
-		"is_outgoing":   m.IsOutgoing,
-		"has_body":      m.HasBody,
-		"is_html":       isHTML,
-	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -232,6 +326,7 @@ func writeErr(w http.ResponseWriter, err error, code int) {
 }
 
 var errNoFetch = errString("credentials not loaded; run sync or pass --credentials")
+var errNoDuckUI = errString("DuckDB UI is disabled; pass --duckdb-ui to serve")
 
 type errString string
 

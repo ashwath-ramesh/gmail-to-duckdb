@@ -493,12 +493,105 @@ func TestExecSQL(t *testing.T) {
 	if err := db.UpsertMessages(ctx, []Message{sample("m1", at)}); err != nil {
 		t.Fatal(err)
 	}
-	res, err := db.ExecSQL(ctx, "SELECT id, subject FROM messages")
+	res, err := db.ExecSQL(ctx, "SELECT id, subject, size_bytes FROM messages")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Columns) != 2 || len(res.Rows) != 1 {
+	if len(res.Columns) != 3 || len(res.Rows) != 1 {
 		t.Fatalf("sql: %+v", res)
+	}
+	if res.Rows[0][0] != "m1" {
+		t.Fatalf("id %#v", res.Rows[0][0])
+	}
+	switch res.Rows[0][2].(type) {
+	case int32, int64, int:
+	default:
+		t.Fatalf("size type %T", res.Rows[0][2])
+	}
+}
+
+func TestQuerySQLReadOnly(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	if _, err := db.QuerySQL(ctx, "SELECT 1", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.QuerySQL(ctx, "INSERT INTO labels(id, name, type) VALUES ('x', 'X', 'user')", false); err == nil {
+		t.Fatal("expected write reject")
+	}
+	if _, err := db.QuerySQL(ctx, "INSERT INTO labels(id, name, type) VALUES ('x', 'X', 'user')", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckSQL(t *testing.T) {
+	if err := CheckSQL("SELECT 1", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSQL("-- comment\nSELECT 1", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSQL("SELECT 1; DROP TABLE messages", false); err == nil {
+		t.Fatal("expected multi-statement reject")
+	}
+	if err := CheckSQL("UPDATE messages SET subject = 'x'", false); err == nil {
+		t.Fatal("expected write reject")
+	}
+	if err := CheckSQL("UPDATE messages SET subject = 'x'", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSQL("WITH d AS (DELETE FROM messages RETURNING id) SELECT count(*) FROM d", false); err == nil {
+		t.Fatal("expected mutating CTE reject")
+	}
+	if err := CheckSQL("EXPLAIN ANALYZE DELETE FROM messages", false); err == nil {
+		t.Fatal("expected explain analyze write reject")
+	}
+	if err := CheckSQL("SELECT * FROM read_csv('/tmp/x.csv')", false); err == nil {
+		t.Fatal("expected file read reject")
+	}
+	if err := CheckSQL("SELECT * FROM messages WHERE subject = 'DELETE'", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSQL("WITH x AS (SELECT id FROM messages) SELECT * FROM x", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCoverageAndSchemaVersion(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	v, ok, err := db.GetState(ctx, StateSchemaVersion)
+	if err != nil || !ok || v != "1" {
+		t.Fatalf("schema version %q %v %v", v, ok, err)
+	}
+	c, err := db.Coverage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Total != 0 || c.SearchCovers() != "metadata" {
+		t.Fatalf("%+v", c)
+	}
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	m1 := sample("m1", at)
+	m2 := sample("m2", at)
+	m2.HasBody = true
+	m2.Body = "hi"
+	if err := db.UpsertMessages(ctx, []Message{m1, m2}); err != nil {
+		t.Fatal(err)
+	}
+	c, err = db.Coverage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Total != 2 || c.WithBody != 1 || c.SearchCovers() != "mixed" {
+		t.Fatalf("%+v", c)
+	}
+	tables, err := db.DescribeSchema(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) < 3 {
+		t.Fatalf("tables %#v", tables)
 	}
 }
 

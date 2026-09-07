@@ -16,6 +16,14 @@ header {
   border-bottom: 1px solid #8884;
   flex-shrink: 0;
 }
+#sync-bar {
+  margin-left: auto;
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  font-size: 0.85rem;
+}
+#sync-status { color: #888; max-width: 28rem; }
 h1 { font-size: 1.1rem; margin: 0; }
 nav button { margin-right: 0.25rem; }
 nav button.active { font-weight: 700; }
