@@ -123,8 +123,16 @@ async function openMsg(id, row) {
   const meta = document.createElement("div");
   meta.className = "meta";
   meta.textContent = [m.from_email, m.subject, m.internal_date, (m.label_ids || []).join(", ")].join("\n");
-  const body = document.createElement("pre");
-  body.textContent = m.has_body ? m.body : (m.snippet || "") + "\n\n(body not synced)";
+  const text = m.has_body ? m.body : (m.snippet || "") + "\n\n(body not synced)";
+  let body;
+  if (m.has_body && m.is_html) {
+    body = document.createElement("div");
+    body.className = "body-html";
+    body.innerHTML = text;
+  } else {
+    body = document.createElement("pre");
+    body.textContent = text;
+  }
   detailEl.append(meta, body);
   if (!m.has_body) {
     const btn = document.createElement("button");

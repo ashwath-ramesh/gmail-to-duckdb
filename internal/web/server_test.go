@@ -68,6 +68,23 @@ func TestIndexAndList(t *testing.T) {
 	}
 }
 
+func TestSecurityHeaders(t *testing.T) {
+	s, _ := testServer(t)
+	h := s.Handler()
+	w := req(t, h, http.MethodGet, "/")
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "img-src 'self'") {
+		t.Fatalf("csp %q", csp)
+	}
+	if w.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("referrer %q", w.Header().Get("Referrer-Policy"))
+	}
+	html := w.Body.String()
+	if !strings.Contains(html, `content="no-referrer"`) {
+		t.Fatalf("missing referrer meta: %s", html)
+	}
+}
+
 func TestSearchQuery(t *testing.T) {
 	s, _ := testServer(t)
 	h := s.Handler()
@@ -90,6 +107,35 @@ func TestSearchQuery(t *testing.T) {
 	}
 	if len(out.Messages) != 0 {
 		t.Fatalf("expected empty %s", w.Body.String())
+	}
+}
+
+func TestHTMLBodySanitized(t *testing.T) {
+	s, db := testServer(t)
+	if err := db.UpdateBody(context.Background(), "m1", `<p>Hi<script>alert(1)</script></p>`); err != nil {
+		t.Fatal(err)
+	}
+	w := req(t, s.Handler(), http.MethodGet, "/api/messages/m1")
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["is_html"] != true {
+		t.Fatalf("is_html %#v", got["is_html"])
+	}
+	body, _ := got["body"].(string)
+	if !strings.Contains(body, "Hi") || strings.Contains(strings.ToLower(body), "script") {
+		t.Fatalf("body %q", body)
+	}
+	stored, err := db.GetMessage(context.Background(), "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stored.Body, "<script>") {
+		t.Fatalf("stored body changed: %q", stored.Body)
 	}
 }
 

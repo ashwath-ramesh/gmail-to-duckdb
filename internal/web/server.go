@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/htmlutil"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/stats"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 )
@@ -32,6 +33,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stats/{name}", s.stat)
 	mux.HandleFunc("POST /api/duckdb-ui", s.duckUI)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'")
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		if !loopbackOnly(r) {
 			http.Error(w, "loopback only", http.StatusForbidden)
 			return
@@ -194,6 +197,11 @@ func msgsJSON(msgs []store.Message) []map[string]any {
 }
 
 func msgJSON(m store.Message) map[string]any {
+	body := m.Body
+	isHTML := htmlutil.LooksLikeHTML(body)
+	if isHTML {
+		body = htmlutil.Sanitize(body)
+	}
 	return map[string]any{
 		"id":            m.ID,
 		"thread_id":     m.ThreadID,
@@ -203,11 +211,12 @@ func msgJSON(m store.Message) map[string]any {
 		"to_emails":     m.ToEmails,
 		"subject":       m.Subject,
 		"snippet":       m.Snippet,
-		"body":          m.Body,
+		"body":          body,
 		"label_ids":     m.LabelIDs,
 		"is_read":       m.IsRead,
 		"is_outgoing":   m.IsOutgoing,
 		"has_body":      m.HasBody,
+		"is_html":       isHTML,
 	}
 }
 

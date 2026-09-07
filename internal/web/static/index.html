@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>Gmail to DuckDB</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
@@ -22,10 +23,12 @@
       </form>
       <p class="hint">from: to: subject: unread after:2024-01-01</p>
       <div class="layout">
-        <div id="list"></div>
+        <div class="list-pane">
+          <div id="list"></div>
+          <button type="button" id="more" hidden>More</button>
+        </div>
         <article id="detail"><p>Select a message.</p></article>
       </div>
-      <button type="button" id="more" hidden>More</button>
     </section>
     <section id="stats" hidden>
       <p class="hint">Preloaded SQL. Ad-hoc queries open in the DuckDB UI.</p>
