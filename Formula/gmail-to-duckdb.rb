@@ -8,10 +8,6 @@ class GmailToDuckdb < Formula
       url "https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/download/v0.1.0/gmail-to-duckdb-darwin-arm64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
-    on_intel do
-      url "https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/download/v0.1.0/gmail-to-duckdb-darwin-amd64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-    end
   end
 
   on_linux do
