@@ -33,8 +33,6 @@ brew tap ashwath-ramesh/gmail-to-duckdb https://github.com/ashwath-ramesh/gmail-
 brew install gmail-to-duckdb
 ```
 
-After the first tagged release, set the `sha256` values in `Formula/gmail-to-duckdb.rb` from `SHA256SUMS` on that release.
-
 **Build from source**
 
 You need [Go](https://go.dev/dl/). On a Mac you also need Xcode command-line tools (`xcode-select --install`).
