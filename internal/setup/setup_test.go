@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/config"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/web"
 )
@@ -56,6 +58,129 @@ func TestInitRejectsWebClient(t *testing.T) {
 	if _, err := Init(src, ""); err == nil {
 		t.Fatal("expected desktop client error")
 	}
+}
+
+func TestInitDoesNotChangeSourceFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	src := filepath.Join(t.TempDir(), "credentials.json")
+	raw := []byte(`{"installed":{"client_id":"x","client_secret":"y"}}`)
+	if err := os.WriteFile(src, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(src, ""); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Mode().Perm() != after.Mode().Perm() {
+		t.Fatalf("source mode changed %o -> %o", before.Mode().Perm(), after.Mode().Perm())
+	}
+	got, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(raw) {
+		t.Fatal("source bytes changed")
+	}
+}
+
+func TestInitReplacesPermissiveCopiedCredentials(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dest := filepath.Join(config.Dir(), "credentials.json")
+	if err := os.MkdirAll(config.Dir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, []byte(`{"installed":{"client_id":"old"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := makePermissive(dest); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), "credentials.json")
+	if err := os.WriteFile(src, []byte(`{"installed":{"client_id":"x","client_secret":"y"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Init(src, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPrivateFile(t, cfg.Credentials)
+	got, err := os.ReadFile(cfg.Credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `"x"`) {
+		t.Fatalf("copy missing: %s", got)
+	}
+}
+
+func TestDoctorRejectsPermissiveToken(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	src := filepath.Join(t.TempDir(), "credentials.json")
+	if err := os.WriteFile(src, []byte(`{"installed":{"client_id":"x","client_secret":"y"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Init(src, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := `{"refresh_token":"r","scope":"https://www.googleapis.com/auth/gmail.readonly"}`
+	path := auth.TokenPath(cfg.DB)
+	if err := os.WriteFile(path, []byte(tok), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := makePermissive(path); err != nil {
+		t.Fatal(err)
+	}
+	env := Doctor(context.Background(), cfg)
+	for _, c := range env.Checks {
+		if c.Name == "token" {
+			if c.OK {
+				t.Fatalf("permissive token passed: %+v", c)
+			}
+			return
+		}
+	}
+	t.Fatal("missing token check")
+}
+
+func TestDoctorAcceptsPrivateToken(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	src := filepath.Join(t.TempDir(), "credentials.json")
+	if err := os.WriteFile(src, []byte(`{"installed":{"client_id":"x","client_secret":"y"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Init(src, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := []byte(`{"refresh_token":"r","scope":"https://www.googleapis.com/auth/gmail.readonly"}`)
+	if err := privfile.Write(auth.TokenPath(cfg.DB), tok); err != nil {
+		t.Fatal(err)
+	}
+	env := Doctor(context.Background(), cfg)
+	for _, c := range env.Checks {
+		if c.Name == "token" {
+			if !c.OK {
+				t.Fatalf("private token failed: %+v", c)
+			}
+			return
+		}
+	}
+	t.Fatal("missing token check")
 }
 
 func TestDoctorStaleServeDoesNotOpenDB(t *testing.T) {

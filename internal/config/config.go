@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 )
 
 const (
@@ -82,15 +83,12 @@ func Load() Config {
 }
 
 func Write(c Config) error {
-	if err := os.MkdirAll(Dir(), 0o700); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
 	b = append(b, '\n')
-	return os.WriteFile(Path(), b, 0o600)
+	return privfile.Write(Path(), b)
 }
 
 func Expand(p string) string {

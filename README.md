@@ -76,7 +76,17 @@ gmail-to-duckdb doctor
 gmail-to-duckdb serve --sync-every 5m
 ```
 
-The first run opens a localhost OAuth page. The callback is always `http://127.0.0.1:41807/`. The token is stored next to the database as `*.token.json` with mode `0600`. The token is not stored in DuckDB.
+The first run opens a localhost OAuth page. The callback is always `http://127.0.0.1:41807/`. The token is stored next to the database as `*.token.json`. The token is not stored in DuckDB.
+
+Secret files (`credentials.json` copy, `*.token.json`, `*.serve.json`, and `config.json`) are written as private files:
+
+- Unix: files use mode `0600`. New app directories use mode `0700`. Existing parent directories stay unchanged.
+- Windows: the current user and SYSTEM get access. Inherited access from other users is blocked.
+- A write creates a private temp file in the same directory, writes the bytes, syncs, then replaces the destination as one file.
+- A reader sees only the previous complete JSON or the new complete JSON.
+- A later write replaces an existing shared file with a private file.
+- A symlink destination or a non-regular file is rejected.
+- A private read checks owner and file type, then tightens permissions, before it reads bytes. It does not follow a symlink.
 
 If the CLI runs on a remote host and you sign in on a laptop, open the tunnel **before** you click Allow:
 
@@ -176,3 +186,4 @@ A later MCP server can wrap the same operations. Do not parse the human table ou
 - Mail is written only to the local DuckDB file.
 - The HTTP UI listens on loopback.
 - Keep `credentials.json`, `*.token.json`, `*.serve.json`, and `*.duckdb` out of git.
+- Secret files are owner-only. Unix uses `0600`. Windows uses current-user and SYSTEM ACLs.

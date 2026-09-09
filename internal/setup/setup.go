@@ -14,6 +14,7 @@ import (
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/config"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/web"
@@ -43,14 +44,14 @@ func Init(credSrc, dbPath string) (config.Config, error) {
 	if err := checkDesktopCreds(raw); err != nil {
 		return config.Config{}, err
 	}
-	if err := os.MkdirAll(config.Dir(), 0o700); err != nil {
+	if err := privfile.MkdirPrivate(config.Dir()); err != nil {
 		return config.Config{}, err
 	}
-	if err := os.MkdirAll(config.DataDir(), 0o700); err != nil {
+	if err := privfile.MkdirPrivate(config.DataDir()); err != nil {
 		return config.Config{}, err
 	}
 	dest := filepath.Join(config.Dir(), "credentials.json")
-	if err := os.WriteFile(dest, raw, 0o600); err != nil {
+	if err := privfile.Write(dest, raw); err != nil {
 		return config.Config{}, err
 	}
 	if dbPath == "" {
@@ -169,16 +170,11 @@ func checkCredentials(path string) query.Check {
 
 func checkToken(path string) query.Check {
 	c := query.Check{Name: "token"}
-	info, err := os.Stat(path)
-	if err != nil {
+	if err := privfile.Check(path); err != nil {
 		c.Detail = err.Error()
 		return c
 	}
-	if info.Mode().Perm() != 0o600 {
-		c.Detail = fmt.Sprintf("mode %o; want 0600", info.Mode().Perm())
-		return c
-	}
-	raw, err := os.ReadFile(path)
+	raw, err := privfile.Read(path)
 	if err != nil {
 		c.Detail = err.Error()
 		return c

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/openurl"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	gmailapi "google.golang.org/api/gmail/v1"
@@ -22,13 +24,15 @@ import (
 // DefaultOAuthPort is a fixed loopback port so a remote SSH tunnel can stay open.
 const DefaultOAuthPort = 41807
 
+var errNeedLogin = errors.New("token unusable")
+
 func TokenPath(dbPath string) string {
 	ext := filepath.Ext(dbPath)
 	return strings.TrimSuffix(dbPath, ext) + ".token.json"
 }
 
 func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) (*http.Client, error) {
-	raw, err := os.ReadFile(credPath)
+	raw, err := privfile.Read(credPath)
 	if err != nil {
 		return nil, fmt.Errorf("read credentials %s: %w", credPath, err)
 	}
@@ -41,6 +45,9 @@ func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) 
 	}
 	tok, err := loadToken(tokenPath)
 	if err != nil {
+		if !errors.Is(err, errNeedLogin) {
+			return nil, err
+		}
 		tok, err = login(ctx, cfg, oauthPort)
 		if err != nil {
 			return nil, err
@@ -63,21 +70,26 @@ func (p *persistSource) Token() (*oauth2.Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = saveToken(p.path, tok)
+	if err := saveToken(p.path, tok); err != nil {
+		return nil, err
+	}
 	return tok, nil
 }
 
 func loadToken(path string) (*oauth2.Token, error) {
-	b, err := os.ReadFile(path)
+	b, err := privfile.Read(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, errNeedLogin
+		}
 		return nil, err
 	}
 	var tok oauth2.Token
 	if err := json.Unmarshal(b, &tok); err != nil {
-		return nil, err
+		return nil, errNeedLogin
 	}
 	if !tok.Valid() && tok.RefreshToken == "" {
-		return nil, fmt.Errorf("token expired")
+		return nil, errNeedLogin
 	}
 	return &tok, nil
 }
@@ -87,17 +99,13 @@ func saveToken(path string, tok *oauth2.Token) error {
 	if err != nil {
 		return err
 	}
-	return writeFile0600(path, b)
-}
-
-func writeFile0600(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
+	return privfile.Write(path, b)
 }
 
 func login(ctx context.Context, cfg *oauth2.Config, port int) (*oauth2.Token, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("oauth listen 127.0.0.1:%d: %w", port, err)

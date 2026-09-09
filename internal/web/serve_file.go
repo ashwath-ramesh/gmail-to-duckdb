@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 )
 
 type ServeInfo struct {
@@ -49,16 +51,12 @@ func WriteServeFile(dbPath string, info ServeInfo) error {
 		return err
 	}
 	b = append(b, '\n')
-	path := ServePath(dbPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, b, 0o600)
+	return privfile.Write(ServePath(dbPath), b)
 }
 
 func ReadServeFile(dbPath string) (ServeInfo, error) {
 	var info ServeInfo
-	b, err := os.ReadFile(ServePath(dbPath))
+	b, err := privfile.Read(ServePath(dbPath))
 	if err != nil {
 		return info, err
 	}
