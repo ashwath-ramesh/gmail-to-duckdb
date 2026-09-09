@@ -124,7 +124,7 @@ Flags:
 - `--json`
 - `--duckdb-ui` (`serve` / `ui`)
 
-`serve` and `ui` bind `127.0.0.1` only. The browser gets an HttpOnly session cookie. The CLI sends `X-Token` from `*.serve.json`. The token is not in the printed URL. Do not run them on a shared host if other users can reach your loopback port.
+`serve` and `ui` bind `127.0.0.1` only. The browser Host must be `127.0.0.1` or `localhost` on the listen port. Cross-site and other local-port origins are rejected. The browser gets an HttpOnly session cookie. The CLI sends `X-Token` from `*.serve.json`. The token is not in the printed URL. Do not run them on a shared host if other users can reach your loopback port.
 
 The DuckDB UI on port 4213 has no session token. It stays off unless you pass `--duckdb-ui`. Treat that flag as full database access on loopback.
 

@@ -83,10 +83,13 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	listenURL, h, err := s.BindListener(ln)
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- web.Serve(ctx, ln, s.Handler()) }()
-
-	listenURL := web.Addr(*port)
+	go func() { errc <- web.Serve(ctx, ln, h) }()
 	if err := web.WriteServeFile(*cf.db, web.ServeInfo{URL: listenURL, Token: s.Token, PID: os.Getpid()}); err != nil {
 		stop()
 		return err

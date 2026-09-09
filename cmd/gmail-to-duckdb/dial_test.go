@@ -20,10 +20,21 @@ func TestCLIDialsServe(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	ln, err := web.Listen("0")
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := &web.Server{DB: db, Token: "tok"}
-	ts := httptest.NewServer(s.Handler())
+	u, h, err := s.BindListener(ln)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewUnstartedServer(h)
+	_ = ts.Listener.Close()
+	ts.Listener = ln
+	ts.Start()
 	t.Cleanup(ts.Close)
-	if err := web.WriteServeFile(dbPath, web.ServeInfo{URL: ts.URL, Token: "tok", PID: 1}); err != nil {
+	if err := web.WriteServeFile(dbPath, web.ServeInfo{URL: u, Token: "tok", PID: 1}); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
