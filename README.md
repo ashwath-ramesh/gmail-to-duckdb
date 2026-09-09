@@ -173,6 +173,8 @@ Search and `get` omit the body. Pass `get --body` only when you need it.
 
 A later MCP server can wrap the same operations. Do not parse the human table output.
 
+Human CLI output escapes terminal controls, bidi overrides and isolates, and invalid UTF-8. Table and metadata fields also escape embedded newlines and tabs, so only the formatter adds row breaks. Message bodies keep intended line breaks and tabs. JSON keeps the original values.
+
 ## Schema
 
 `messages` stores typed columns: ids, timestamps, from, to, cc, subject, snippet, nullable body, labels, read/outgoing/deleted flags, and `search_text` for one-box search.

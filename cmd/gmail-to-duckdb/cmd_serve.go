@@ -44,7 +44,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	}
 	defer db.Close()
 	if err := db.EnsureFTS(ctx); err != nil {
-		fmt.Fprintln(stderr, "fts:", err)
+		writeDiag(stderr, fmt.Sprintf("fts: %v", err))
 	}
 
 	tok, err := web.NewToken()
@@ -69,14 +69,14 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 				r := &mailsync.Runner{
 					DB:         db,
 					API:        api,
-					Log:        func(format string, a ...any) { fmt.Fprintf(stderr, format+"\n", a...) },
+					Log:        func(format string, a ...any) { writeDiag(stderr, fmt.Sprintf(format, a...)) },
 					OnProgress: s.SetProgress,
 				}
 				return r.Sync(ctx, opt)
 			}
 		}
 	} else {
-		fmt.Fprintln(stderr, "gmail client disabled:", err)
+		writeDiag(stderr, fmt.Sprintf("gmail client disabled: %v", err))
 	}
 
 	ln, err := web.Listen(*port)
@@ -99,7 +99,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	startup := asServe || interval > 0
 	if startup && s.Sync != nil {
 		if err := s.StartSync(ctx, mailsync.Options{}); err != nil {
-			fmt.Fprintln(stderr, "startup sync:", err)
+			writeDiag(stderr, fmt.Sprintf("startup sync: %v", err))
 		}
 	}
 	if interval > 0 && s.Sync != nil {
@@ -112,7 +112,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 					return
 				case <-t.C:
 					if err := s.StartSync(ctx, mailsync.Options{}); err != nil {
-						fmt.Fprintln(stderr, "scheduled sync:", err)
+						writeDiag(stderr, fmt.Sprintf("scheduled sync: %v", err))
 					}
 				}
 			}
