@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -411,13 +412,103 @@ func TestEnsureFTS(t *testing.T) {
 	if err := db.SetState(ctx, stateFTSIndex, "old"); err != nil {
 		t.Fatal(err)
 	}
-	db.ftsOK = false
 	if err := db.EnsureFTS(ctx); err != nil {
 		t.Fatal(err)
 	}
 	ver, has, err := db.GetState(ctx, stateFTSIndex)
 	if err != nil || !has || ver != ftsIndexVer {
 		t.Fatalf("ver %q %v %v", ver, has, err)
+	}
+}
+
+func TestConcurrentHasFTSRebuildList(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	db := testDB(t)
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	msg := sample("m1", at)
+	msg.Subject = "pineapple note"
+	if err := db.UpsertMessages(ctx, []Message{msg}); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errc := make(chan error, 3)
+	start := make(chan struct{})
+	run := func(fn func() error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 8; i++ {
+				if err := fn(); err != nil {
+					errc <- err
+					return
+				}
+			}
+		}()
+	}
+	run(func() error {
+		_, err := db.HasFTS(ctx)
+		return err
+	})
+	run(func() error {
+		return db.RebuildFTS(ctx)
+	})
+	run(func() error {
+		hits, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "pineapple"})
+		if err != nil {
+			return err
+		}
+		if len(hits) != 1 || hits[0].ID != "m1" {
+			return errors.New("search lost seeded message")
+		}
+		return nil
+	})
+	close(start)
+	wg.Wait()
+	close(errc)
+	for err := range errc {
+		t.Fatal(err)
+	}
+}
+
+func TestHasFTSAfterAllowedDropFTSSchema(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	msg := sample("m1", at)
+	msg.Subject = "pineapple note"
+	if err := db.UpsertMessages(ctx, []Message{msg}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RebuildFTS(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := db.HasFTS(ctx)
+	if err != nil || !ok {
+		t.Fatalf("fts after rebuild %v %v", ok, err)
+	}
+	if _, err := db.QuerySQL(ctx, "DROP SCHEMA fts_main_messages CASCADE", true); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = db.HasFTS(ctx)
+	if err != nil || ok {
+		t.Fatalf("fts after drop %v %v", ok, err)
+	}
+	hits, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "pineapple"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].ID != "m1" {
+		t.Fatalf("like fallback after drop: %#v", ids(hits))
+	}
+	short, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(short) != 1 || short[0].ID != "m1" {
+		t.Fatalf("short query after drop: %#v", ids(short))
 	}
 }
 
@@ -624,6 +715,8 @@ func TestQuerySQLGuards(t *testing.T) {
 	}
 	if _, err := db.QuerySQL(ctx, "SELECT 1\x00DELETE FROM labels", false); err == nil {
 		t.Fatal("expected NUL reject")
+	} else if !strings.Contains(err.Error(), "NUL") {
+		t.Fatalf("nul diagnostic: %v", err)
 	}
 	mustLabels(t)
 
@@ -675,6 +768,98 @@ func TestQuerySQLGuards(t *testing.T) {
 	if _, err := db.QuerySQL(ctx, readCSV, true); err == nil {
 		t.Fatal("external access must stay off")
 	}
+}
+
+func TestQuerySQLExplainAnalyzeBlockedSideEffects(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dir := t.TempDir()
+	copyPath := filepath.Join(dir, "explain_copy.csv")
+	attachPath := filepath.Join(dir, "explain_attach.duckdb")
+	csvPath := filepath.Join(dir, "sentinel.csv")
+	if err := os.WriteFile(csvPath, []byte("n\nEXPLAIN_CALL_SENTINEL\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	qCopy := "EXPLAIN ANALYZE COPY (SELECT 1 AS n) TO '" + strings.ReplaceAll(copyPath, "'", "''") + "'"
+	qAttach := "EXPLAIN ANALYZE ATTACH '" + strings.ReplaceAll(attachPath, "'", "''") + "' AS explain_extra"
+	qCall := "EXPLAIN ANALYZE CALL read_csv('" + strings.ReplaceAll(csvPath, "'", "''") + "')"
+
+	threadsBefore := currentSetting(t, db, "threads")
+	wantThreads := "7"
+	if threadsBefore == wantThreads {
+		wantThreads = "8"
+	}
+
+	if _, err := db.QuerySQL(ctx, qCopy, true); err == nil {
+		t.Fatal("expected EXPLAIN ANALYZE COPY error")
+	}
+	if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
+		t.Fatalf("copy target: %v", err)
+	}
+
+	if _, err := db.QuerySQL(ctx, qAttach, true); err == nil {
+		t.Fatal("expected EXPLAIN ANALYZE ATTACH error")
+	}
+	if _, err := os.Stat(attachPath); !os.IsNotExist(err) {
+		t.Fatalf("attach target: %v", err)
+	}
+	dbs, err := db.QuerySQL(ctx, "SELECT database_name FROM duckdb_databases()", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range dbs.StringRows() {
+		if len(row) > 0 && row[0] == "explain_extra" {
+			t.Fatal("EXPLAIN ANALYZE ATTACH must not attach a database")
+		}
+	}
+
+	if _, err := db.QuerySQL(ctx, "EXPLAIN ANALYZE SET threads = "+wantThreads, true); err == nil {
+		t.Fatal("expected EXPLAIN ANALYZE SET error")
+	}
+	if got := currentSetting(t, db, "threads"); got != threadsBefore {
+		t.Fatalf("EXPLAIN ANALYZE SET changed threads from %s to %s", threadsBefore, got)
+	}
+
+	if res, err := db.QuerySQL(ctx, qCall, true); err == nil {
+		t.Fatalf("expected EXPLAIN ANALYZE CALL read_csv error, got %+v", res)
+	}
+	if _, err := db.QuerySQL(ctx, "CALL duckdb_settings()", true); err == nil {
+		t.Fatal("expected bare CALL reject")
+	}
+}
+
+func TestQuerySQLExplainAnalyzeWriteDML(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	if err := db.UpsertLabels(ctx, []Label{{ID: "TMP", Name: "Tmp", Type: "user"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.QuerySQL(ctx, "EXPLAIN ANALYZE DELETE FROM labels WHERE id = 'TMP'", true); err != nil {
+		t.Fatal(err)
+	}
+	labels, err := db.LabelMap(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := labels["TMP"]; ok {
+		t.Fatal("EXPLAIN ANALYZE DELETE must remove TMP")
+	}
+	if _, err := db.QuerySQL(ctx, "EXPLAIN ANALYZE SELECT 1", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func currentSetting(t *testing.T, db *DB, name string) string {
+	t.Helper()
+	res, err := db.QuerySQL(context.Background(), "SELECT current_setting('"+name+"')", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := res.StringRows()
+	if len(rows) != 1 || len(rows[0]) != 1 {
+		t.Fatalf("setting %s: %+v", name, res)
+	}
+	return rows[0][0]
 }
 
 func TestQuerySQLConnRecover(t *testing.T) {

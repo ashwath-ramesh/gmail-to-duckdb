@@ -146,8 +146,7 @@ func (c Coverage) SearchCovers() string {
 }
 
 type DB struct {
-	sql   *sql.DB
-	ftsOK bool
+	sql *sql.DB
 }
 
 type Options struct {
@@ -176,12 +175,16 @@ func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
 		_ = sqldb.Close()
 		return nil, err
 	}
-	if _, err := sqldb.Exec(schema); err != nil {
-		_ = sqldb.Close()
-		return nil, fmt.Errorf("schema: %w", err)
-	}
 	db := &DB{sql: sqldb}
 	ctx := context.Background()
+	if err := db.rejectUnsupportedSchema(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := sqldb.Exec(schema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("schema: %w", err)
+	}
 	if err := db.migrateSearch(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -249,13 +252,28 @@ func (d *DB) lockSQL() error {
 	return nil
 }
 
+func unsupportedSchema(ver int) error {
+	if ver < 0 || ver > SchemaVersion {
+		return fmt.Errorf("unsupported schema_version %d", ver)
+	}
+	return nil
+}
+
+func (d *DB) rejectUnsupportedSchema(ctx context.Context) error {
+	ver, err := d.schemaVersion(ctx)
+	if err != nil {
+		return err
+	}
+	return unsupportedSchema(ver)
+}
+
 func (d *DB) migrateSchema(ctx context.Context) error {
 	ver, err := d.schemaVersion(ctx)
 	if err != nil {
 		return err
 	}
-	if ver < 0 || ver > SchemaVersion {
-		return fmt.Errorf("unsupported schema_version %d", ver)
+	if err := unsupportedSchema(ver); err != nil {
+		return err
 	}
 	if ver == SchemaVersion {
 		return nil
@@ -286,6 +304,17 @@ ON CONFLICT (key) DO UPDATE SET value = excluded.value
 }
 
 func (d *DB) schemaVersion(ctx context.Context) (int, error) {
+	var n int
+	err := d.sql.QueryRowContext(ctx, `
+SELECT count(*) FROM information_schema.tables
+WHERE table_schema = 'main' AND table_name = 'sync_state'
+`).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, nil
+	}
 	v, ok, err := d.GetState(ctx, StateSchemaVersion)
 	if err != nil {
 		return 0, err
@@ -293,11 +322,11 @@ func (d *DB) schemaVersion(ctx context.Context) (int, error) {
 	if !ok {
 		return 0, nil
 	}
-	n, err := strconv.Atoi(v)
+	ver, err := strconv.Atoi(v)
 	if err != nil {
 		return 0, fmt.Errorf("schema_version: %w", err)
 	}
-	return n, nil
+	return ver, nil
 }
 
 func (d *DB) migrateSearch(ctx context.Context) error {
@@ -462,9 +491,13 @@ func (d *DB) ListMessages(ctx context.Context, f ListFilter) ([]Message, error) 
 		f.Before = q.Before
 	}
 
-	hasFTS, err := d.hasFTS(ctx)
-	if err != nil {
-		return nil, err
+	var hasFTS bool
+	if q.Text != "" {
+		ok, err := d.hasFTS(ctx)
+		if err != nil {
+			return nil, err
+		}
+		hasFTS = ok
 	}
 	short := utf8.RuneCountInString(q.Text) < 2
 	if q.Text != "" && hasFTS {
@@ -771,7 +804,6 @@ PRAGMA create_fts_index('messages', 'id', 'search_text', overwrite=1)
 	if err := d.SetState(ctx, stateFTSIndex, ftsIndexVer); err != nil {
 		return err
 	}
-	d.ftsOK = true
 	return nil
 }
 
@@ -819,9 +851,6 @@ func refreshSearchTextTx(ctx context.Context, ex execer, ids []string) error {
 }
 
 func (d *DB) hasFTS(ctx context.Context) (bool, error) {
-	if d.ftsOK {
-		return true, nil
-	}
 	var n int
 	err := d.sql.QueryRowContext(ctx, `
 SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'fts_main_messages'
@@ -833,11 +862,7 @@ SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'fts_main_messages'
 	if err != nil {
 		return false, err
 	}
-	ok := n > 0 && ver == ftsIndexVer
-	if ok {
-		d.ftsOK = true
-	}
-	return ok, nil
+	return n > 0 && ver == ftsIndexVer, nil
 }
 
 func (d *DB) HasFTS(ctx context.Context) (bool, error) {

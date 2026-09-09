@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -186,6 +187,45 @@ func TestRejectUnsupportedSchemaVersions(t *testing.T) {
 	}
 }
 
+func TestLegacyMissingSchemaVersionMigrates(t *testing.T) {
+	path := writeV1Fixture(t)
+	deleteRawState(t, path, StateSchemaVersion)
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	assertMigratedV1(t, db)
+}
+
+func TestRejectIncompatibleFutureSchema(t *testing.T) {
+	for _, ver := range []string{"99", "-1", "abc"} {
+		t.Run(ver, func(t *testing.T) {
+			path := writeFutureFixture(t)
+			if ver != "99" {
+				setRawState(t, path, StateSchemaVersion, ver)
+			}
+			before := rawFutureSnapshot(t, path)
+			db, err := Open(path)
+			if err == nil {
+				_ = db.Close()
+				t.Fatal("expected unsupported version reject")
+			}
+			if ver == "abc" {
+				if !strings.Contains(err.Error(), "schema_version") {
+					t.Fatalf("err %v", err)
+				}
+			} else if !strings.Contains(err.Error(), "unsupported schema_version") {
+				t.Fatalf("err %v", err)
+			}
+			after := rawFutureSnapshot(t, path)
+			if after != before {
+				t.Fatalf("catalog/data/state changed:\nbefore=%s\nafter=%s", before, after)
+			}
+		})
+	}
+}
+
 func TestMigrateV2RollbackOnNormalizeFail(t *testing.T) {
 	path := writeV1FixtureChecked(t)
 	before := rawV1Snapshot(t, path)
@@ -348,6 +388,133 @@ type v1Snap struct {
 	History        string
 }
 
+func writeFutureFixture(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(dbParent(t), "future.duckdb")
+	raw, err := sql.Open("duckdb", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`
+CREATE TABLE messages (
+  id VARCHAR PRIMARY KEY,
+  thread_id VARCHAR NOT NULL,
+  history_id UBIGINT,
+  internal_date TIMESTAMP NOT NULL,
+  from_name VARCHAR,
+  from_email VARCHAR,
+  to_emails VARCHAR[],
+  cc_emails VARCHAR[],
+  subject VARCHAR,
+  snippet VARCHAR,
+  body VARCHAR,
+  size_bytes INTEGER,
+  label_ids VARCHAR[],
+  is_read BOOLEAN,
+  is_outgoing BOOLEAN,
+  is_deleted BOOLEAN DEFAULT false,
+  has_body BOOLEAN DEFAULT false,
+  synced_at TIMESTAMP,
+  future_flag BOOLEAN
+);
+CREATE TABLE sync_state (
+  key VARCHAR PRIMARY KEY,
+  value VARCHAR
+);
+CREATE TABLE future_meta (
+  k VARCHAR PRIMARY KEY,
+  v VARCHAR
+);
+INSERT INTO messages(
+  id, thread_id, internal_date, from_name, from_email, to_emails, cc_emails,
+  subject, snippet, body, size_bytes, label_ids, is_read, is_outgoing, is_deleted, has_body, synced_at, future_flag
+) VALUES (
+  'm1', 't1', TIMESTAMP '2024-01-01 00:00:00', '', 'a@x.com', [], [],
+  'hello', '', 'secret', 1, [], false, false, false, true, TIMESTAMP '2024-01-01 00:00:00', true
+);
+INSERT INTO sync_state(key, value) VALUES
+  ('schema_version', '99'),
+  ('history_id', '7');
+INSERT INTO future_meta(k, v) VALUES ('keep', 'yes');
+`)
+	closeErr := raw.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err := privfile.Harden(path); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func rawFutureSnapshot(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := sql.Open("duckdb", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var b strings.Builder
+	dump := func(title, q string) {
+		b.WriteString(title)
+		b.WriteByte('\n')
+		rows, err := raw.Query(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		cols, err := rows.Columns()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			rawRow := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range rawRow {
+				ptrs[i] = &rawRow[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				t.Fatal(err)
+			}
+			for i, v := range rawRow {
+				if i > 0 {
+					b.WriteByte('|')
+				}
+				if v == nil {
+					b.WriteString("<nil>")
+					continue
+				}
+				b.WriteString(asSnapText(v))
+			}
+			b.WriteByte('\n')
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dump("tables", `SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' ORDER BY 1`)
+	dump("columns", `SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = 'main' ORDER BY 1, ordinal_position`)
+	dump("indexes", `SELECT index_name, table_name FROM duckdb_indexes() WHERE schema_name = 'main' ORDER BY 1, 2`)
+	dump("state", `SELECT key, value FROM sync_state ORDER BY 1`)
+	dump("future_meta", `SELECT k, v FROM future_meta ORDER BY 1`)
+	dump("rows", `SELECT id, subject, COALESCE(body, ''), future_flag FROM messages ORDER BY 1`)
+	return b.String()
+}
+
+func asSnapText(v any) string {
+	switch t := v.(type) {
+	case []byte:
+		return string(t)
+	case string:
+		return t
+	default:
+		return fmt.Sprint(t)
+	}
+}
+
 func setRawState(t *testing.T, path, key, value string) {
 	t.Helper()
 	raw, err := sql.Open("duckdb", path)
@@ -358,6 +525,22 @@ func setRawState(t *testing.T, path, key, value string) {
 INSERT INTO sync_state(key, value) VALUES (?, ?)
 ON CONFLICT (key) DO UPDATE SET value = excluded.value
 `, key, value)
+	closeErr := raw.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+}
+
+func deleteRawState(t *testing.T, path, key string) {
+	t.Helper()
+	raw, err := sql.Open("duckdb", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`DELETE FROM sync_state WHERE key = ?`, key)
 	closeErr := raw.Close()
 	if err != nil {
 		t.Fatal(err)

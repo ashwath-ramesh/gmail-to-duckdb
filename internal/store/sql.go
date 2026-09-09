@@ -11,6 +11,7 @@ import (
 	duckdb "github.com/duckdb/duckdb-go/v2"
 )
 
+// ExecSQL runs trusted embedded SQL only. User SQL must use QuerySQL.
 func (d *DB) ExecSQL(ctx context.Context, query string) (SQLResult, error) {
 	rows, err := d.sql.QueryContext(ctx, query)
 	if err != nil {
@@ -66,7 +67,7 @@ func (d *DB) QuerySQL(ctx context.Context, query string, allowWrite bool) (SQLRe
 
 func rejectSQLText(query string) error {
 	if strings.IndexByte(query, 0) >= 0 {
-		return fmt.Errorf("empty query")
+		return fmt.Errorf("query contains a NUL byte")
 	}
 	if strings.TrimSpace(query) == "" {
 		return fmt.Errorf("empty query")
@@ -74,6 +75,8 @@ func rejectSQLText(query string) error {
 	return nil
 }
 
+// inspectUserSQL uses native Prepare. Prepare must not execute the statement
+// or any prefix. Statement type is the allow-list input.
 func inspectUserSQL(c *sql.Conn, query string, allowWrite bool) error {
 	return c.Raw(func(dc any) error {
 		conn, ok := dc.(*duckdb.Conn)
