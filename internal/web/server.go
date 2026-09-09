@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -85,11 +86,18 @@ func (s *Server) validToken(r *http.Request) bool {
 	if s.Token == "" {
 		return false
 	}
-	if r.Header.Get("X-Token") == s.Token {
+	if tokenEq(r.Header.Get("X-Token"), s.Token) {
 		return true
 	}
 	c, err := r.Cookie("session")
-	return err == nil && c.Value == s.Token
+	return err == nil && tokenEq(c.Value, s.Token)
+}
+
+func tokenEq(got, want string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func Listen(port string) (net.Listener, error) {
@@ -329,12 +337,19 @@ func (s *Server) duckUI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errNoDuckUI, http.StatusBadRequest)
 		return
 	}
-	_, err := s.DB.SQL().ExecContext(r.Context(), "CALL start_ui()")
-	if err != nil {
+	if _, err := s.DB.SQL().ExecContext(r.Context(), "CALL start_ui_server()"); err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"url": "http://127.0.0.1:4213"})
+	var u string
+	if err := s.DB.SQL().QueryRowContext(r.Context(), "CALL get_ui_url()").Scan(&u); err != nil || u == "" {
+		if err == nil {
+			err = errNoUIURL
+		}
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"url": u})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -350,6 +365,7 @@ func writeErr(w http.ResponseWriter, err error, code int) {
 
 var errNoFetch = errString("credentials not loaded; run sync or pass --credentials")
 var errNoDuckUI = errString("DuckDB UI is disabled; pass --duckdb-ui to serve")
+var errNoUIURL = errString("DuckDB UI URL unavailable")
 
 type errString string
 

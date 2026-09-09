@@ -351,28 +351,6 @@ func callbackPathOK(p string) bool {
 	return p == "/" || p == ""
 }
 
-func CodeFromRedirect(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", fmt.Errorf("empty redirect")
-	}
-	if strings.Contains(s, "://") || strings.HasPrefix(s, "http") {
-		u, err := url.Parse(s)
-		if err != nil {
-			return "", err
-		}
-		code := u.Query().Get("code")
-		if code == "" {
-			return "", fmt.Errorf("redirect has no code")
-		}
-		return code, nil
-	}
-	if i := strings.Index(s, "code="); i >= 0 {
-		return CodeFromRedirect("http://localhost/?" + s[i:])
-	}
-	return s, nil
-}
-
 func cloneConfig(cfg *oauth2.Config) *oauth2.Config {
 	cp := *cfg
 	return &cp

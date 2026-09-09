@@ -23,30 +23,6 @@ func TestTokenPath(t *testing.T) {
 	}
 }
 
-func TestCodeFromRedirect(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"http://127.0.0.1:41807/?state=state&iss=https://accounts.google.com&code=4/0ATsMZqA", "4/0ATsMZqA"},
-		{"http://127.0.0.1:41609/?code=abc&state=state", "abc"},
-		{"4/0ATsMZqA", "4/0ATsMZqA"},
-		{"  4/xyz  ", "4/xyz"},
-	}
-	for _, c := range cases {
-		got, err := CodeFromRedirect(c.in)
-		if err != nil {
-			t.Fatalf("%q: %v", c.in, err)
-		}
-		if got != c.want {
-			t.Fatalf("%q: got %q want %q", c.in, got, c.want)
-		}
-	}
-	if _, err := CodeFromRedirect("http://127.0.0.1:41807/?state=state"); err == nil {
-		t.Fatal("expected error")
-	}
-}
-
 func TestWriteTokenMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mail.token.json")
 	if err := saveToken(path, &oauth2.Token{AccessToken: "x", RefreshToken: "r"}); err != nil {

@@ -278,9 +278,59 @@ func TestSessionCookie(t *testing.T) {
 
 func TestDuckUIDisabled(t *testing.T) {
 	s, _ := testServer(t)
+	createUITableMacro(t, s, "start_ui", "'started'")
+	createUITableMacro(t, s, "start_ui_server", "'started'")
+	createUITableMacro(t, s, "get_ui_url", "'http://[::1]:55555'")
 	w := req(t, s.Handler(), http.MethodPost, "/api/duckdb-ui")
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("code %d %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"url"`) {
+		t.Fatalf("opt-out returned url %s", w.Body.String())
+	}
+}
+
+func TestDuckUIReturnsActualURL(t *testing.T) {
+	s, _ := testServer(t)
+	s.AllowDuckUI = true
+	createUITableMacro(t, s, "start_ui", "'started'")
+	createUITableMacro(t, s, "start_ui_server", "'started'")
+	createUITableMacro(t, s, "get_ui_url", "'http://[::1]:55555'")
+	w := req(t, s.Handler(), http.MethodPost, "/api/duckdb-ui")
+	if w.Code != 200 {
+		t.Fatalf("code %d %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.URL != "http://[::1]:55555" {
+		t.Fatalf("url %q", out.URL)
+	}
+}
+
+func TestDuckUIURLErrorIsNotSuccess(t *testing.T) {
+	s, _ := testServer(t)
+	s.AllowDuckUI = true
+	createUITableMacro(t, s, "start_ui", "'started'")
+	createUITableMacro(t, s, "start_ui_server", "'started'")
+	createUITableMacro(t, s, "get_ui_url", "error('no url')")
+	w := req(t, s.Handler(), http.MethodPost, "/api/duckdb-ui")
+	if w.Code == 200 {
+		t.Fatalf("success %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"url"`) {
+		t.Fatalf("error returned url %s", w.Body.String())
+	}
+}
+
+func createUITableMacro(t *testing.T, s *Server, name, expr string) {
+	t.Helper()
+	q := "CREATE OR REPLACE MACRO " + name + "() AS TABLE SELECT " + expr
+	if _, err := s.DB.SQL().Exec(q); err != nil {
+		t.Fatal(err)
 	}
 }
 
