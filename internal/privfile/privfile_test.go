@@ -279,13 +279,14 @@ func TestHardenDirRejectsSymlink(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		skipIfNoSymlink(t, err)
 	}
+	before := snapshotParent(t, target)
 	if err := HardenDir(path); err == nil {
 		t.Fatal("expected symlink reject")
 	}
 	if err := CheckDir(path); err == nil {
 		t.Fatal("expected symlink reject")
 	}
-	assertNewAppDirPrivate(t, target)
+	assertParentUnchanged(t, target, before)
 }
 
 func TestHardenDirDoesNotChmodParent(t *testing.T) {

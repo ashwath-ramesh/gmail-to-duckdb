@@ -112,7 +112,7 @@ func readPrivate(path string) ([]byte, error) {
 }
 
 func checkPrivate(path string) error {
-	h, err := openPath(path, windows.GENERIC_READ|windows.READ_CONTROL)
+	h, err := openPath(path, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES)
 	if err != nil {
 		return err
 	}

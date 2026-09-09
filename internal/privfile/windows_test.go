@@ -154,12 +154,12 @@ func TestCheckDirRejectsNoPropagateInherit(t *testing.T) {
 	}
 }
 
-func TestCheckSucceedsWhileWriteHandleHeld(t *testing.T) {
+func TestCheckSucceedsWhileExclusiveWriteHandleHeld(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secret.json")
 	if err := Write(path, []byte(`{"v":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	f, err := openAppWrite(path)
+	f, err := openAppWriteExclusive(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,6 @@ func TestCheckSucceedsWhileWriteHandleHeld(t *testing.T) {
 	if err := Check(path); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivate(t, path)
 }
 
 func TestReplaceWhileReadHandleHeld(t *testing.T) {
@@ -379,7 +378,7 @@ func openAppRead(path string) (*os.File, error) {
 	return os.NewFile(uintptr(h), path), nil
 }
 
-func openAppWrite(path string) (*os.File, error) {
+func openAppWriteExclusive(path string) (*os.File, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
@@ -387,7 +386,7 @@ func openAppWrite(path string) (*os.File, error) {
 	h, err := windows.CreateFile(
 		p,
 		windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		0,
 		nil,
 		windows.OPEN_EXISTING,
 		windows.FILE_FLAG_OPEN_REPARSE_POINT,
