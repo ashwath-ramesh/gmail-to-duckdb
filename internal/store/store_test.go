@@ -227,14 +227,14 @@ func TestStateAndMissingIDs(t *testing.T) {
 	}
 }
 
-func TestBodyAndIDsWithoutBody(t *testing.T) {
+func TestBodyAndIDsNeedingFetch(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	if err := db.UpsertMessages(ctx, []Message{sample("m1", at)}); err != nil {
 		t.Fatal(err)
 	}
-	ids, err := db.IDsWithoutBody(ctx, 10)
+	ids, err := db.IDsNeedingFetch(ctx, "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestBodyAndIDsWithoutBody(t *testing.T) {
 	if len(hits) != 1 || hits[0].ID != "m1" {
 		t.Fatalf("body search: %d", len(hits))
 	}
-	ids, err = db.IDsWithoutBody(ctx, 10)
+	ids, err = db.IDsNeedingFetch(ctx, "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +828,7 @@ func TestCoverageAndSchemaVersion(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	v, ok, err := db.GetState(ctx, StateSchemaVersion)
-	if err != nil || !ok || v != "1" {
+	if err != nil || !ok || v != "2" {
 		t.Fatalf("schema version %q %v %v", v, ok, err)
 	}
 	c, err := db.Coverage(ctx)

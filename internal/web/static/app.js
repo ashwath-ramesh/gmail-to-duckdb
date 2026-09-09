@@ -133,7 +133,14 @@ async function openMsg(id, row) {
   const meta = document.createElement("div");
   meta.className = "meta";
   meta.textContent = [m.from_email, m.subject, m.internal_date, (m.label_ids || []).join(", ")].join("\n");
-  const text = m.has_body ? m.body : (m.snippet || "") + "\n\n(body not synced)";
+  let text;
+  if (m.has_body) {
+    text = m.body;
+  } else if (m.body_fetched) {
+    text = "No text body";
+  } else {
+    text = (m.snippet || "") + "\n\n(body not synced)";
+  }
   let body;
   if (m.has_body && m.is_html) {
     body = document.createElement("div");
@@ -144,7 +151,7 @@ async function openMsg(id, row) {
     body.textContent = text;
   }
   detailEl.append(meta, body);
-  if (!m.has_body) {
+  if (!m.has_body && !m.body_fetched) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.textContent = "Fetch body";

@@ -42,7 +42,7 @@ func TestStatusEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env.SchemaVersion != 1 {
+	if env.SchemaVersion != 2 {
 		t.Fatalf("schema %d", env.SchemaVersion)
 	}
 	if env.BodyCoverage.SearchCovers != "metadata" {
@@ -104,7 +104,7 @@ func TestSchemaAndSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env.Schema == nil || env.Schema.Version != 1 || len(env.Schema.Tables) < 3 {
+	if env.Schema == nil || env.Schema.Version != 2 || len(env.Schema.Tables) < 3 {
 		t.Fatalf("%+v", env.Schema)
 	}
 	if env.UntrustedContent {

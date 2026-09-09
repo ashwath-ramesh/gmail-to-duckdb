@@ -63,6 +63,7 @@ type Message struct {
 	IsRead       bool     `json:"is_read"`
 	IsOutgoing   bool     `json:"is_outgoing"`
 	HasBody      bool     `json:"has_body"`
+	BodyFetched  bool     `json:"body_fetched"`
 	IsHTML       bool     `json:"is_html,omitempty"`
 }
 
@@ -198,6 +199,7 @@ func MessageFromStore(m store.Message, includeBody bool) Message {
 		IsRead:       m.IsRead,
 		IsOutgoing:   m.IsOutgoing,
 		HasBody:      m.HasBody,
+		BodyFetched:  m.BodyFetched,
 	}
 	if includeBody {
 		body := m.Body

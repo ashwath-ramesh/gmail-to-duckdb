@@ -138,9 +138,11 @@ Flags:
 
 The DuckDB UI on port 4213 has no session token. It stays off unless you pass `--duckdb-ui`. Treat that flag as full database access on loopback.
 
-Mail lists metadata. Open a message and use Fetch body to pull one body from Gmail. The Stats page runs the bundled SQL files. Use `sql` or pass `--duckdb-ui` for ad-hoc SQL.
+Mail lists metadata. Open a message and use Fetch body to pull one body from Gmail. A completed fetch with no text shows **No text body**. The UI hides Fetch body after a completed empty fetch. The Stats page runs the bundled SQL files. Use `sql` or pass `--duckdb-ui` for ad-hoc SQL.
 
-Mail search is one box. Type words. The index covers from, to, cc, subject, snippet, and body. Sync builds that index. Bodies are optional. Status shows whether search covers metadata, mixed, or bodies.
+Mail search is one box. Type words. The index covers from, to, cc, subject, snippet, and body. Sync builds that index. Bodies are optional. Status `with_body` counts messages that have a nonempty body. `body_fetched` marks a finished full fetch, even when the message has no text.
+
+`sync --bodies` walks pending ids in ordered pages. Each pending id is attempted once per sync. Missing or unparseable replies stay pending for the next sync. The run does not loop those ids again. Transport errors still stop after the existing Gmail retry limit.
 
 Operators in the same box:
 
@@ -177,7 +179,14 @@ Human CLI output escapes terminal controls, bidi overrides and isolates, and inv
 
 ## Schema
 
-`messages` stores typed columns: ids, timestamps, from, to, cc, subject, snippet, nullable body, labels, read/outgoing/deleted flags, and `search_text` for one-box search.
+`schema_version` is `2`.
+
+`messages` stores typed columns: ids, timestamps, from, to, cc, subject, snippet, nullable body, labels, read/outgoing/deleted flags, `has_body`, `body_fetched`, and `search_text` for one-box search.
+
+- `has_body` is true only when the stored body is nonempty.
+- `body_fetched` is true after a successful full fetch or on-demand body write, even when the body is empty.
+
+A v1 mailbox gains `body_fetched` on open. The migration copies the old `has_body` flag, then sets `has_body` from the real body text. Mail rows and other `sync_state` keys stay. The version changes only after that work commits.
 
 `labels` maps Gmail label ids to names.
 

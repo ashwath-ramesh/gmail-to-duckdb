@@ -295,7 +295,7 @@ func TestStatusSchemaSQL(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
-	if env.SchemaVersion != 1 || env.Phase != "idle" {
+	if env.SchemaVersion != 2 || env.Phase != "idle" {
 		t.Fatalf("%+v", env)
 	}
 	if env.UntrustedContent {
