@@ -11,6 +11,7 @@ import (
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/config"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/termtext"
 )
 
 type cmdFlags struct {
@@ -76,6 +77,10 @@ func isBoolFlag(fs *flag.FlagSet, arg string) bool {
 	return ok && bf.IsBoolFlag()
 }
 
+func writeDiag(w io.Writer, s string) {
+	fmt.Fprintln(w, termtext.SingleLine(s))
+}
+
 func writeEnv(w io.Writer, env query.Envelope, asJSON bool) error {
 	if asJSON {
 		enc := json.NewEncoder(w)
@@ -105,7 +110,7 @@ func joinTab(cols []string) string {
 		if i > 0 {
 			out += "\t"
 		}
-		out += c
+		out += termtext.SingleLine(c)
 	}
 	return out
 }

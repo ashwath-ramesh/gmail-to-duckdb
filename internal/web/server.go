@@ -2,12 +2,15 @@ package web
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -19,13 +22,34 @@ import (
 )
 
 type Server struct {
-	DB          *store.DB
-	Token       string
-	FetchBody   func(ctx context.Context, id string) (string, error)
-	Sync        func(ctx context.Context, opt mailsync.Options) error
-	SyncCtx     context.Context
-	AllowDuckUI bool
-	rt          runtime
+	DB           *store.DB
+	Token        string
+	FetchBody    func(ctx context.Context, id string) (string, error)
+	Sync         func(ctx context.Context, opt mailsync.Options) error
+	SyncCtx      context.Context
+	AllowDuckUI  bool
+	AllowedHosts []string
+	rt           runtime
+}
+
+func AllowedHosts(port int) []string {
+	if port <= 0 {
+		return nil
+	}
+	if port == 80 {
+		return []string{"127.0.0.1", "localhost", "127.0.0.1:80", "localhost:80"}
+	}
+	p := strconv.Itoa(port)
+	return []string{"127.0.0.1:" + p, "localhost:" + p}
+}
+
+func (s *Server) BindListener(ln net.Listener) (string, http.Handler, error) {
+	ta, ok := ln.Addr().(*net.TCPAddr)
+	if !ok || ta.Port <= 0 {
+		return "", nil, fmt.Errorf("listen port unavailable")
+	}
+	s.AllowedHosts = AllowedHosts(ta.Port)
+	return Addr(strconv.Itoa(ta.Port)), s.Handler(), nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -46,8 +70,8 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		if !loopbackOnly(r) {
-			http.Error(w, "loopback only", http.StatusForbidden)
+		if !loopbackOnly(r) || !s.allowHost(r) || !s.allowOrigin(r) || !s.allowFetchSite(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") && !s.validToken(r) {
@@ -62,11 +86,18 @@ func (s *Server) validToken(r *http.Request) bool {
 	if s.Token == "" {
 		return false
 	}
-	if r.Header.Get("X-Token") == s.Token {
+	if tokenEq(r.Header.Get("X-Token"), s.Token) {
 		return true
 	}
 	c, err := r.Cookie("session")
-	return err == nil && c.Value == s.Token
+	return err == nil && tokenEq(c.Value, s.Token)
+}
+
+func tokenEq(got, want string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func Listen(port string) (net.Listener, error) {
@@ -306,12 +337,19 @@ func (s *Server) duckUI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errNoDuckUI, http.StatusBadRequest)
 		return
 	}
-	_, err := s.DB.SQL().ExecContext(r.Context(), "CALL start_ui()")
-	if err != nil {
+	if _, err := s.DB.SQL().ExecContext(r.Context(), "CALL start_ui_server()"); err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"url": "http://127.0.0.1:4213"})
+	var u string
+	if err := s.DB.SQL().QueryRowContext(r.Context(), "CALL get_ui_url()").Scan(&u); err != nil || u == "" {
+		if err == nil {
+			err = errNoUIURL
+		}
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"url": u})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -327,6 +365,7 @@ func writeErr(w http.ResponseWriter, err error, code int) {
 
 var errNoFetch = errString("credentials not loaded; run sync or pass --credentials")
 var errNoDuckUI = errString("DuckDB UI is disabled; pass --duckdb-ui to serve")
+var errNoUIURL = errString("DuckDB UI URL unavailable")
 
 type errString string
 
@@ -339,4 +378,90 @@ func loopbackOnly(r *http.Request) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func (s *Server) allowHost(r *http.Request) bool {
+	if len(s.AllowedHosts) == 0 {
+		return false
+	}
+	got := canonicalHost(r.Host)
+	if got == "" {
+		return false
+	}
+	for _, a := range s.AllowedHosts {
+		if canonicalHost(a) == got {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalHost(host string) string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return ""
+	}
+	name, port, err := net.SplitHostPort(h)
+	if err != nil {
+		if strings.Contains(h, ":") {
+			return ""
+		}
+		return h
+	}
+	if name == "" || port == "" {
+		return ""
+	}
+	if port == "80" {
+		return name
+	}
+	return name + ":" + port
+}
+
+func (s *Server) allowOrigin(r *http.Request) bool {
+	vals := r.Header.Values("Origin")
+	if len(vals) == 0 {
+		return true
+	}
+	if len(vals) != 1 {
+		return false
+	}
+	got, ok := parseHTTPOrigin(vals[0])
+	return ok && got == canonicalHost(r.Host)
+}
+
+func parseHTTPOrigin(raw string) (string, bool) {
+	if raw == "" || strings.EqualFold(raw, "null") {
+		return "", false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", false
+	}
+	if u.Scheme != "http" || u.User != nil || u.Opaque != "" || u.Host == "" {
+		return "", false
+	}
+	if u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", false
+	}
+	h := canonicalHost(u.Host)
+	if h == "" {
+		return "", false
+	}
+	return h, true
+}
+
+func (s *Server) allowFetchSite(r *http.Request) bool {
+	vals := r.Header.Values("Sec-Fetch-Site")
+	if len(vals) == 0 {
+		return true
+	}
+	if len(vals) != 1 {
+		return false
+	}
+	switch strings.ToLower(vals[0]) {
+	case "none", "same-origin":
+		return true
+	default:
+		return false
+	}
 }

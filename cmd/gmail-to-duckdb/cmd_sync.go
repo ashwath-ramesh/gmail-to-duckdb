@@ -33,6 +33,8 @@ func cmdSync(args []string, stdout, stderr io.Writer) error {
 		defer c.Close()
 		_, err = c.SyncNow(ctx, opt)
 		return err
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("serve file present but unreadable: %w", err)
 	}
 
 	db, err := store.Open(*cf.db)
@@ -51,7 +53,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) error {
 	r := &mailsync.Runner{
 		DB:  db,
 		API: api,
-		Log: func(format string, a ...any) { fmt.Fprintf(stderr, format+"\n", a...) },
+		Log: func(format string, a ...any) { writeDiag(stderr, fmt.Sprintf(format, a...)) },
 	}
 	return r.Sync(ctx, opt)
 }

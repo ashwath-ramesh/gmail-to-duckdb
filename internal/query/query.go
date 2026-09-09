@@ -10,6 +10,7 @@ import (
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/htmlutil"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/termtext"
 )
 
 const defaultLimit = 50
@@ -62,6 +63,7 @@ type Message struct {
 	IsRead       bool     `json:"is_read"`
 	IsOutgoing   bool     `json:"is_outgoing"`
 	HasBody      bool     `json:"has_body"`
+	BodyFetched  bool     `json:"body_fetched"`
 	IsHTML       bool     `json:"is_html,omitempty"`
 }
 
@@ -171,10 +173,8 @@ func SQL(ctx context.Context, db *store.DB, query string, allowWrite bool) (Enve
 	}
 	env.SQL = &SQLPayload{Columns: res.Columns, ColumnTypes: res.ColumnTypes, Rows: res.Rows}
 	env.ResultCount = len(res.Rows)
-	if fields := sqlUntrustedFields(query, res.Columns); len(fields) > 0 {
-		env.UntrustedContent = true
-		env.UntrustedFields = fields
-	}
+	env.UntrustedContent = true
+	env.UntrustedFields = append([]string{}, res.Columns...)
 	return env, nil
 }
 
@@ -183,25 +183,6 @@ var mailTextFields = []string{"subject", "snippet", "body", "from_name", "from_e
 func MarkMailUntrusted(env *Envelope) {
 	env.UntrustedContent = true
 	env.UntrustedFields = append([]string{}, mailTextFields...)
-}
-
-func sqlUntrustedFields(query string, cols []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(s string) {
-		low := strings.ToLower(s)
-		for _, f := range mailTextFields {
-			if strings.Contains(low, f) && !seen[f] {
-				seen[f] = true
-				out = append(out, f)
-			}
-		}
-	}
-	add(query)
-	for _, c := range cols {
-		add(c)
-	}
-	return out
 }
 
 func MessageFromStore(m store.Message, includeBody bool) Message {
@@ -218,6 +199,7 @@ func MessageFromStore(m store.Message, includeBody bool) Message {
 		IsRead:       m.IsRead,
 		IsOutgoing:   m.IsOutgoing,
 		HasBody:      m.HasBody,
+		BodyFetched:  m.BodyFetched,
 	}
 	if includeBody {
 		body := m.Body
@@ -269,31 +251,35 @@ func FormatHuman(env Envelope) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "schema_version %d\n", env.SchemaVersion)
 	if env.LastSync != "" {
-		fmt.Fprintf(&b, "last_sync %s\n", env.LastSync)
+		fmt.Fprintf(&b, "last_sync %s\n", termtext.SingleLine(env.LastSync))
 	}
-	fmt.Fprintf(&b, "bodies %d/%d (%s)\n", env.BodyCoverage.WithBody, env.BodyCoverage.Total, env.BodyCoverage.SearchCovers)
+	fmt.Fprintf(&b, "bodies %d/%d (%s)\n", env.BodyCoverage.WithBody, env.BodyCoverage.Total, termtext.SingleLine(env.BodyCoverage.SearchCovers))
 	if env.Phase != "" {
-		fmt.Fprintf(&b, "phase %s\n", env.Phase)
+		fmt.Fprintf(&b, "phase %s\n", termtext.SingleLine(env.Phase))
 	}
 	if env.LastError != "" {
-		fmt.Fprintf(&b, "last_error %s\n", env.LastError)
+		fmt.Fprintf(&b, "last_error %s\n", termtext.SingleLine(env.LastError))
 	}
 	if env.Message != nil {
-		fmt.Fprintf(&b, "id %s\nthread_id %s\nfrom %s\nsubject %s\n", env.Message.ID, env.Message.ThreadID, env.Message.FromEmail, env.Message.Subject)
+		fmt.Fprintf(&b, "id %s\nthread_id %s\nfrom %s\nsubject %s\n",
+			termtext.SingleLine(env.Message.ID),
+			termtext.SingleLine(env.Message.ThreadID),
+			termtext.SingleLine(env.Message.FromEmail),
+			termtext.SingleLine(env.Message.Subject))
 		if env.Message.Body != "" {
-			fmt.Fprintf(&b, "\n%s\n", env.Message.Body)
+			fmt.Fprintf(&b, "\n%s\n", termtext.Multiline(env.Message.Body))
 		} else if env.Message.Snippet != "" {
-			fmt.Fprintf(&b, "snippet %s\n", env.Message.Snippet)
+			fmt.Fprintf(&b, "snippet %s\n", termtext.SingleLine(env.Message.Snippet))
 		}
 	}
 	for _, m := range env.Messages {
-		fmt.Fprintf(&b, "%s\t%s\t%s\n", m.ID, m.FromEmail, m.Subject)
+		fmt.Fprintf(&b, "%s\t%s\t%s\n", termtext.SingleLine(m.ID), termtext.SingleLine(m.FromEmail), termtext.SingleLine(m.Subject))
 	}
 	if env.Schema != nil {
-		for _, t := range env.Schema.Tables {
-			fmt.Fprintf(&b, "%s\n", t.Name)
-			for _, c := range t.Columns {
-				fmt.Fprintf(&b, "  %s %s\n", c.Name, c.Type)
+		for _, tbl := range env.Schema.Tables {
+			fmt.Fprintf(&b, "%s\n", termtext.SingleLine(tbl.Name))
+			for _, c := range tbl.Columns {
+				fmt.Fprintf(&b, "  %s %s\n", termtext.SingleLine(c.Name), termtext.SingleLine(c.Type))
 			}
 		}
 	}
@@ -302,7 +288,7 @@ func FormatHuman(env Envelope) string {
 		if !c.OK {
 			mark = "FAIL"
 		}
-		fmt.Fprintf(&b, "%s %s %s\n", mark, c.Name, c.Detail)
+		fmt.Fprintf(&b, "%s %s %s\n", mark, termtext.SingleLine(c.Name), termtext.SingleLine(c.Detail))
 	}
 	return b.String()
 }

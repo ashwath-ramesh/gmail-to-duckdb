@@ -9,6 +9,7 @@ import (
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/config"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/setup"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/termtext"
 )
 
 func cmdInit(args []string, stdout io.Writer) error {
@@ -33,9 +34,9 @@ func cmdInit(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "wrote %s\n", config.Path())
-	fmt.Fprintf(stdout, "credentials %s\n", cfg.Credentials)
-	fmt.Fprintf(stdout, "db %s\n", cfg.DB)
+	fmt.Fprintf(stdout, "wrote %s\n", termtext.SingleLine(config.Path()))
+	fmt.Fprintf(stdout, "credentials %s\n", termtext.SingleLine(cfg.Credentials))
+	fmt.Fprintf(stdout, "db %s\n", termtext.SingleLine(cfg.DB))
 	fmt.Fprintln(stdout, "next: gmail-to-duckdb doctor && gmail-to-duckdb serve --sync-every 5m")
 	return nil
 }

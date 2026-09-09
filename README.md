@@ -76,7 +76,17 @@ gmail-to-duckdb doctor
 gmail-to-duckdb serve --sync-every 5m
 ```
 
-The first run opens a localhost OAuth page. The callback is always `http://127.0.0.1:41807/`. The token is stored next to the database as `*.token.json` with mode `0600`. The token is not stored in DuckDB.
+The first run opens a localhost OAuth page. The callback is `http://127.0.0.1:41807/` unless you set `--oauth-port`. Each sign-in creates a new random `state` and a PKCE S256 challenge. The callback must send exactly one matching `state`. A missing, reused, wrong, or duplicate `state` is rejected. A callback may send one `code` or one `error`, not both. A malformed query is rejected. Sign-in stays open after an invalid callback. The token exchange sends the matching `code_verifier`. The token is stored next to the database as `*.token.json`. The token is not stored in DuckDB.
+
+Secret files (`credentials.json` copy, `*.token.json`, `*.serve.json`, and `config.json`) are written as private files:
+
+- Unix: files use mode `0600`. New app directories use mode `0700`. Existing parent directories stay unchanged.
+- Windows: the current user and SYSTEM get access. Inherited access from other users is blocked.
+- A write creates a private temp file in the same directory, writes the bytes, syncs, then replaces the destination as one file.
+- A reader sees only the previous complete JSON or the new complete JSON.
+- A later write replaces an existing shared file with a private file.
+- A symlink destination or a non-regular file is rejected.
+- A private read checks owner and file type, then tightens permissions, before it reads bytes. It does not follow a symlink.
 
 If the CLI runs on a remote host and you sign in on a laptop, open the tunnel **before** you click Allow:
 
@@ -84,7 +94,7 @@ If the CLI runs on a remote host and you sign in on a laptop, open the tunnel **
 ssh -L 41807:127.0.0.1:41807 USER@REMOTE
 ```
 
-Or copy the `http://127.0.0.1:41807/?code=...` URL from the laptop and paste it into the remote prompt.
+Or copy the redirect URL from the laptop and paste it into the remote prompt. The URL must use `127.0.0.1` and the listen port. It must include the same `state`. It must not include a user name or a fragment. You can also paste the `code=` value or the raw code. The exchange is bound to this sign-in by PKCE. If the paste includes `state`, including a percent-encoded `state` key, it must match. A URL on another host is rejected.
 
 Flags override the config file. If no config file exists, the working directory defaults stay `mail.duckdb` and `credentials.json`.
 
@@ -111,7 +121,9 @@ gmail-to-duckdb sql --json < query.sql
 
 `sync` stays available for one-shot jobs. If `serve` is running, `sync` and the query commands call its HTTP API. If a serve file exists but serve is down, those commands fail. They do not open the locked DuckDB file. If no serve file exists, they open DuckDB.
 
-`sql` is read-only by default. Pass `--write` for mutating statements, file reads, and `EXPLAIN ANALYZE` of writes. `--read-only` is an explicit no-op for agents. Read-only mode also turns off DuckDB external file access.
+`sql` is read-only by default. Pass `--write` for ordinary database DML and DDL only. `--write` does not allow transaction control, settings changes, extension install or load, `ATTACH`/`DETACH`, `COPY`, import/export, or external files. `--read-only` is an explicit no-op for agents. Both modes disable DuckDB external file access and lock that configuration.
+
+Dynamic `PIVOT table ON ...` is rejected. DuckDB expands that form into writes and multiple statements. Use `FROM table PIVOT (...)` for a supported read.
 
 Flags:
 
@@ -122,13 +134,15 @@ Flags:
 - `--json`
 - `--duckdb-ui` (`serve` / `ui`)
 
-`serve` and `ui` bind `127.0.0.1` only. The browser gets an HttpOnly session cookie. The CLI sends `X-Token` from `*.serve.json`. The token is not in the printed URL. Do not run them on a shared host if other users can reach your loopback port.
+`serve` and `ui` bind `127.0.0.1` only. The browser Host must be `127.0.0.1` or `localhost` on the listen port. Cross-site and other local-port origins are rejected. The browser gets an HttpOnly session cookie. The CLI sends `X-Token` from `*.serve.json`. The token is not in the printed URL. Do not run them on a shared host if other users can reach your loopback port.
 
 The DuckDB UI on port 4213 has no session token. It stays off unless you pass `--duckdb-ui`. Treat that flag as full database access on loopback.
 
-Mail lists metadata. Open a message and use Fetch body to pull one body from Gmail. The Stats page runs the bundled SQL files. Use `sql` or pass `--duckdb-ui` for ad-hoc SQL.
+Mail lists metadata. Open a message and use Fetch body to pull one body from Gmail. A completed fetch with no text shows **No text body**. The UI hides Fetch body after a completed empty fetch. The Stats page runs the bundled SQL files. Use `sql` or pass `--duckdb-ui` for ad-hoc SQL.
 
-Mail search is one box. Type words. The index covers from, to, cc, subject, snippet, and body. Sync builds that index. Bodies are optional. Status shows whether search covers metadata, mixed, or bodies.
+Mail search is one box. Type words. The index covers from, to, cc, subject, snippet, and body. Sync builds that index. Bodies are optional. Status `with_body` counts messages that have a nonempty body. `body_fetched` marks a finished full fetch, even when the message has no text.
+
+`sync --bodies` walks pending ids in ordered pages. Each pending id is attempted once per sync. Missing or unparseable replies stay pending for the next sync. The run does not loop those ids again. Transport errors still stop after the existing Gmail retry limit.
 
 Operators in the same box:
 
@@ -150,10 +164,10 @@ Every `--json` command prints the same envelope:
 - `body_coverage` (`with_body`, `total`, `search_covers`)
 - `result_count`, `truncated`
 - `untrusted_content`
-- `untrusted_fields` (email text columns when present)
+- `untrusted_fields` (returned SQL column aliases, or email text columns on mail results)
 - typed values (`messages`, `message`, `schema`, `sql`, `checks`)
 
-`untrusted_content` is true only when the result can include email text. `SELECT 1` stays trusted. Treat fields in `untrusted_fields` as hostile. They can contain prompt-injection text and sensitive data. Do not let a model approve `--write` or `get --body` from that text.
+Successful `sql` results always set `untrusted_content`. `untrusted_fields` lists every returned SQL column. Treat those columns and all nested values as hostile. They can contain prompt-injection text and sensitive data. Status and schema stay trusted and do not set this warning. Search and `get` still mark email text fields. Do not let a model approve `--write` or `get --body` from untrusted text.
 
 Search and `get` omit the body. Pass `get --body` only when you need it.
 
@@ -161,9 +175,18 @@ Search and `get` omit the body. Pass `get --body` only when you need it.
 
 A later MCP server can wrap the same operations. Do not parse the human table output.
 
+Human CLI output escapes terminal controls, bidi overrides and isolates, and invalid UTF-8. Table and metadata fields also escape embedded newlines and tabs, so only the formatter adds row breaks. Message bodies keep intended line breaks and tabs. JSON keeps the original values.
+
 ## Schema
 
-`messages` stores typed columns: ids, timestamps, from, to, cc, subject, snippet, nullable body, labels, read/outgoing/deleted flags, and `search_text` for one-box search.
+`schema_version` is `2`.
+
+`messages` stores typed columns: ids, timestamps, from, to, cc, subject, snippet, nullable body, labels, read/outgoing/deleted flags, `has_body`, `body_fetched`, and `search_text` for one-box search.
+
+- `has_body` is true only when the stored body is nonempty.
+- `body_fetched` is true after a successful full fetch or on-demand body write, even when the body is empty.
+
+A v1 mailbox gains `body_fetched` on open. The migration copies the old `has_body` flag, then sets `has_body` from the real body text. Mail rows and other `sync_state` keys stay. The version changes only after that work commits.
 
 `labels` maps Gmail label ids to names.
 
@@ -174,3 +197,13 @@ A later MCP server can wrap the same operations. Do not parse the human table ou
 - Mail is written only to the local DuckDB file.
 - The HTTP UI listens on loopback.
 - Keep `credentials.json`, `*.token.json`, `*.serve.json`, and `*.duckdb` out of git.
+- Secret files are owner-only. Unix uses `0600`. Windows uses current-user and SYSTEM ACLs.
+- The process sets Unix umask `077` once at start. It does not restore the previous umask.
+- The database path stays where you set it. The tool does not move the file. The path is a filesystem path. A NUL byte, DSN options after `?`, or an in-memory URL is a startup error. A Windows drive colon is allowed.
+- Before DuckDB opens the mailbox, the tool hardens an existing database and known WAL sidecars (`.wal`, `.wal.checkpoint`, `.wal.recovery`) when they are regular files you own. It does not delete WAL files. A symlink or a file you do not own is a startup error.
+- DuckDB temp and spill files use a private directory next to the database (`*.duckdb.tmp`). Existing files in that directory are made private. A symlink or other non-regular entry in that directory is a startup error. The tool does not follow or delete those entries, and it does not change files outside that directory.
+- New database files use mode `0600`. New private directories use mode `0700`. Windows uses current-user and SYSTEM ACLs, with inheritance on those directories, before DuckDB creates files.
+- Unix accepts a custom parent that is only traversable (mode `0755`) because umask `077` still creates private files. A parent that is writable by group or other is refused. The tool does not chmod a custom directory.
+- Windows requires a private inherited parent (current user and SYSTEM only) so DuckDB-created files stay private. The parent must inherit current-user protection to files and subdirectories. An inherit-only ACE for another trustee is refused. A custom unsafe parent is refused. `init` hardens the configured app config and data directories only.
+- Windows also accepts the process token owner (often Administrators when the process is elevated) together with a tight DACL (current user, SYSTEM, and that token owner only). It does not trust an Admin-owned file that allows other trustees.
+- A serve file that exists but is unreadable or unsafe is a hard error. The tool does not fall back to opening the database.

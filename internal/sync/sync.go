@@ -18,7 +18,12 @@ const (
 	stateHistoryPage  = "history_page_token"
 	stateHistoryStart = "history_start_id"
 	stateProfile      = "profile_email"
+
+	bodyPageSize = 50
+	persistBound = 10 * time.Second
 )
+
+var errBodyIncomplete = errors.New("body fetch incomplete")
 
 type Options struct {
 	Full   bool
@@ -130,19 +135,21 @@ func (r *Runner) sync(ctx context.Context, opt Options) error {
 		}
 	}
 
+	var bodyErr error
 	if opt.Bodies {
-		if err := r.bodies(ctx, profile.Email); err != nil {
-			return err
-		}
+		bodyErr = r.bodies(ctx, profile.Email)
 	}
 	if r.wrote {
 		r.progress("fts")
 		r.logf("rebuilding fts")
 		if err := r.DB.RebuildFTS(ctx); err != nil {
+			if bodyErr != nil {
+				return errors.Join(err, bodyErr)
+			}
 			return err
 		}
 	}
-	return nil
+	return bodyErr
 }
 
 func (r *Runner) clearHistoryResume(ctx context.Context) error {
@@ -274,20 +281,27 @@ func (r *Runner) incremental(ctx context.Context, start uint64) error {
 
 func (r *Runner) bodies(ctx context.Context, email string) error {
 	r.progress("bodies")
+	after := ""
+	var incomplete error
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return errors.Join(err, incomplete)
 		}
-		ids, err := r.DB.IDsWithoutBody(ctx, 50)
+		ids, err := r.DB.IDsNeedingFetch(ctx, after, bodyPageSize)
 		if err != nil {
 			return err
 		}
 		if len(ids) == 0 {
-			return nil
+			return incomplete
 		}
 		if err := r.ingest(ctx, ids, "full", email); err != nil {
-			return err
+			if errors.Is(err, errBodyIncomplete) {
+				incomplete = err
+			} else {
+				return errors.Join(err, incomplete)
+			}
 		}
+		after = ids[len(ids)-1]
 	}
 }
 
@@ -299,6 +313,14 @@ func (r *Runner) ingest(ctx context.Context, ids []string, format, email string)
 	if err != nil {
 		return err
 	}
+	full := format == "full"
+	want := make(map[string]struct{}, len(ids))
+	if full {
+		for _, id := range unique(ids) {
+			want[id] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{}, len(raws))
 	msgs := make([]store.Message, 0, len(raws))
 	for _, raw := range raws {
 		msg, err := parse.Message(raw, email)
@@ -306,9 +328,26 @@ func (r *Runner) ingest(ctx context.Context, ids []string, format, email string)
 			r.logf("skip parse: %v", err)
 			continue
 		}
+		if full {
+			if _, ok := want[msg.ID]; !ok {
+				continue
+			}
+			if _, ok := seen[msg.ID]; ok {
+				continue
+			}
+			msg.BodyFetched = true
+			msg.HasBody = msg.Body != ""
+		}
 		msgs = append(msgs, msg)
+		seen[msg.ID] = struct{}{}
 	}
-	if err := r.DB.UpsertMessages(ctx, msgs); err != nil {
+	writeCtx := ctx
+	if full {
+		var cancel context.CancelFunc
+		writeCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), persistBound)
+		defer cancel()
+	}
+	if err := r.DB.UpsertMessages(writeCtx, msgs); err != nil {
 		return err
 	}
 	if len(msgs) > 0 {
@@ -317,6 +356,13 @@ func (r *Runner) ingest(ctx context.Context, ids []string, format, email string)
 		r.progress(r.phase)
 	}
 	r.logf("upserted %d %s messages", len(msgs), format)
+	if full {
+		for _, id := range ids {
+			if _, ok := seen[id]; !ok {
+				return fmt.Errorf("%w: missing or unparseable responses", errBodyIncomplete)
+			}
+		}
+	}
 	return nil
 }
 

@@ -5,6 +5,8 @@ credentials.json
 *.serve.json
 *.duckdb
 *.duckdb.wal
+*.duckdb.wal.checkpoint
+*.duckdb.wal.recovery
 *.duckdb.tmp
 *.duckdb.files
 .DS_Store

@@ -38,13 +38,13 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	db, err := store.Open(*cf.db)
+	db, err := store.OpenWith(*cf.db, store.Options{DuckUI: *duckUI})
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 	if err := db.EnsureFTS(ctx); err != nil {
-		fmt.Fprintln(stderr, "fts:", err)
+		writeDiag(stderr, fmt.Sprintf("fts: %v", err))
 	}
 
 	tok, err := web.NewToken()
@@ -69,24 +69,27 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 				r := &mailsync.Runner{
 					DB:         db,
 					API:        api,
-					Log:        func(format string, a ...any) { fmt.Fprintf(stderr, format+"\n", a...) },
+					Log:        func(format string, a ...any) { writeDiag(stderr, fmt.Sprintf(format, a...)) },
 					OnProgress: s.SetProgress,
 				}
 				return r.Sync(ctx, opt)
 			}
 		}
 	} else {
-		fmt.Fprintln(stderr, "gmail client disabled:", err)
+		writeDiag(stderr, fmt.Sprintf("gmail client disabled: %v", err))
 	}
 
 	ln, err := web.Listen(*port)
 	if err != nil {
 		return err
 	}
+	listenURL, h, err := s.BindListener(ln)
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- web.Serve(ctx, ln, s.Handler()) }()
-
-	listenURL := web.Addr(*port)
+	go func() { errc <- web.Serve(ctx, ln, h) }()
 	if err := web.WriteServeFile(*cf.db, web.ServeInfo{URL: listenURL, Token: s.Token, PID: os.Getpid()}); err != nil {
 		stop()
 		return err
@@ -96,7 +99,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	startup := asServe || interval > 0
 	if startup && s.Sync != nil {
 		if err := s.StartSync(ctx, mailsync.Options{}); err != nil {
-			fmt.Fprintln(stderr, "startup sync:", err)
+			writeDiag(stderr, fmt.Sprintf("startup sync: %v", err))
 		}
 	}
 	if interval > 0 && s.Sync != nil {
@@ -109,7 +112,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 					return
 				case <-t.C:
 					if err := s.StartSync(ctx, mailsync.Options{}); err != nil {
-						fmt.Fprintln(stderr, "scheduled sync:", err)
+						writeDiag(stderr, fmt.Sprintf("scheduled sync: %v", err))
 					}
 				}
 			}

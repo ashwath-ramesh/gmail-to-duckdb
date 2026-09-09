@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,7 +15,7 @@ import (
 )
 
 const (
-	SchemaVersion      = 1
+	SchemaVersion      = 2
 	StateSchemaVersion = "schema_version"
 	StateLastSyncOK    = "last_sync_ok"
 	StateLastSyncError = "last_sync_error"
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS messages (
   is_outgoing BOOLEAN,
   is_deleted BOOLEAN DEFAULT false,
   has_body BOOLEAN DEFAULT false,
+  body_fetched BOOLEAN DEFAULT false,
   synced_at TIMESTAMP,
   search_text VARCHAR
 );
@@ -78,7 +80,7 @@ const messageSelect = `
 SELECT id, thread_id, history_id, internal_date,
        from_name, from_email, to_json(to_emails)::VARCHAR, to_json(cc_emails)::VARCHAR,
        subject, snippet, '', size_bytes, to_json(label_ids)::VARCHAR,
-       is_read, is_outgoing, is_deleted, has_body, synced_at
+       is_read, is_outgoing, is_deleted, has_body, body_fetched, synced_at
 `
 
 type Message struct {
@@ -99,6 +101,7 @@ type Message struct {
 	IsOutgoing   bool
 	IsDeleted    bool
 	HasBody      bool
+	BodyFetched  bool
 	SyncedAt     time.Time
 }
 
@@ -143,42 +146,187 @@ func (c Coverage) SearchCovers() string {
 }
 
 type DB struct {
-	sql   *sql.DB
-	ftsOK bool
+	sql *sql.DB
+}
+
+type Options struct {
+	DuckUI bool
 }
 
 func Open(path string) (*DB, error) {
+	return OpenWith(path, Options{})
+}
+
+func OpenWith(path string, opt Options) (*DB, error) {
+	return openWith(path, opt, nil)
+}
+
+func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
+	path, spill, err := prepareOpen(path)
+	if err != nil {
+		return nil, err
+	}
 	sqldb, err := sql.Open("duckdb", path)
 	if err != nil {
 		return nil, err
 	}
 	sqldb.SetMaxOpenConns(1)
-	if _, err := sqldb.Exec(schema); err != nil {
+	if err := applyTempSettings(sqldb, spill); err != nil {
 		_ = sqldb.Close()
-		return nil, fmt.Errorf("schema: %w", err)
+		return nil, err
 	}
 	db := &DB{sql: sqldb}
 	ctx := context.Background()
+	if err := db.rejectUnsupportedSchema(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := sqldb.Exec(schema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("schema: %w", err)
+	}
 	if err := db.migrateSearch(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := db.ensureSchemaVersion(ctx); err != nil {
+	if err := db.migrateSchema(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	var ex execer = sqldb
+	if wrap != nil {
+		ex = wrap(sqldb)
+	}
+	if err := bootstrapTrusted(ex, opt); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := db.lockSQL(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
 }
 
-func (d *DB) ensureSchemaVersion(ctx context.Context) error {
-	_, ok, err := d.GetState(ctx, StateSchemaVersion)
+func applyTempSettings(db *sql.DB, spill string) error {
+	return execSet(db, "temp_directory", spill)
+}
+
+func execSet(db *sql.DB, name, value string) error {
+	q := "SET " + name + " = '" + strings.ReplaceAll(value, "'", "''") + "'"
+	if _, err := db.Exec(q); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	return nil
+}
+
+func bootstrapTrusted(ex execer, opt Options) error {
+	_ = loadExtension(ex, "fts")
+	if opt.DuckUI {
+		if err := loadExtension(ex, "ui"); err != nil {
+			return fmt.Errorf("duckdb ui: %w", err)
+		}
+	}
+	return nil
+}
+
+func loadExtension(ex execer, name string) error {
+	ctx := context.Background()
+	if _, err := ex.ExecContext(ctx, "LOAD "+name); err == nil {
+		return nil
+	}
+	if _, err := ex.ExecContext(ctx, "INSTALL "+name); err != nil {
+		return err
+	}
+	_, err := ex.ExecContext(ctx, "LOAD "+name)
+	return err
+}
+
+func (d *DB) lockSQL() error {
+	if _, err := d.sql.Exec("SET enable_external_access = false"); err != nil {
+		return fmt.Errorf("enable_external_access: %w", err)
+	}
+	if _, err := d.sql.Exec("SET lock_configuration = true"); err != nil {
+		return fmt.Errorf("lock_configuration: %w", err)
+	}
+	return nil
+}
+
+func unsupportedSchema(ver int) error {
+	if ver < 0 || ver > SchemaVersion {
+		return fmt.Errorf("unsupported schema_version %d", ver)
+	}
+	return nil
+}
+
+func (d *DB) rejectUnsupportedSchema(ctx context.Context) error {
+	ver, err := d.schemaVersion(ctx)
 	if err != nil {
 		return err
 	}
-	if ok {
+	return unsupportedSchema(ver)
+}
+
+func (d *DB) migrateSchema(ctx context.Context) error {
+	ver, err := d.schemaVersion(ctx)
+	if err != nil {
+		return err
+	}
+	if err := unsupportedSchema(ver); err != nil {
+		return err
+	}
+	if ver == SchemaVersion {
 		return nil
 	}
-	return d.SetState(ctx, StateSchemaVersion, fmt.Sprintf("%d", SchemaVersion))
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if ver < 2 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS body_fetched BOOLEAN DEFAULT false`); err != nil {
+			return fmt.Errorf("body_fetched: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET body_fetched = true WHERE has_body`); err != nil {
+			return fmt.Errorf("body_fetched backfill: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET has_body = (body IS NOT NULL AND body <> '')`); err != nil {
+			return fmt.Errorf("has_body normalize: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO sync_state(key, value) VALUES (?, ?)
+ON CONFLICT (key) DO UPDATE SET value = excluded.value
+`, StateSchemaVersion, strconv.Itoa(SchemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) schemaVersion(ctx context.Context) (int, error) {
+	var n int
+	err := d.sql.QueryRowContext(ctx, `
+SELECT count(*) FROM information_schema.tables
+WHERE table_schema = 'main' AND table_name = 'sync_state'
+`).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	v, ok, err := d.GetState(ctx, StateSchemaVersion)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, nil
+	}
+	ver, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("schema_version: %w", err)
+	}
+	return ver, nil
 }
 
 func (d *DB) migrateSearch(ctx context.Context) error {
@@ -219,12 +367,12 @@ INSERT INTO messages (
   id, thread_id, history_id, internal_date,
   from_name, from_email, to_emails, cc_emails,
   subject, snippet, body, size_bytes, label_ids,
-  is_read, is_outgoing, is_deleted, has_body, synced_at
+  is_read, is_outgoing, is_deleted, has_body, body_fetched, synced_at
 ) VALUES (
   ?, ?, ?, ?,
   ?, ?, CAST(? AS VARCHAR[]), CAST(? AS VARCHAR[]),
   ?, ?, ?, ?, CAST(? AS VARCHAR[]),
-  ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT (id) DO UPDATE SET
   thread_id = excluded.thread_id,
@@ -236,13 +384,14 @@ ON CONFLICT (id) DO UPDATE SET
   cc_emails = excluded.cc_emails,
   subject = excluded.subject,
   snippet = excluded.snippet,
-  body = CASE WHEN excluded.has_body THEN excluded.body ELSE messages.body END,
+  body = CASE WHEN excluded.body_fetched THEN excluded.body ELSE messages.body END,
   size_bytes = excluded.size_bytes,
   label_ids = excluded.label_ids,
   is_read = excluded.is_read,
   is_outgoing = excluded.is_outgoing,
   is_deleted = excluded.is_deleted,
-  has_body = messages.has_body OR excluded.has_body,
+  has_body = CASE WHEN excluded.body_fetched THEN excluded.has_body ELSE messages.has_body END,
+  body_fetched = messages.body_fetched OR excluded.body_fetched,
   synced_at = excluded.synced_at
 `
 	stmt, err := tx.PrepareContext(ctx, q)
@@ -254,7 +403,7 @@ ON CONFLICT (id) DO UPDATE SET
 	ids := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		var body any
-		if m.HasBody {
+		if m.BodyFetched || m.HasBody {
 			body = m.Body
 		}
 		if m.ToEmails == nil {
@@ -273,7 +422,7 @@ ON CONFLICT (id) DO UPDATE SET
 			m.ID, m.ThreadID, m.HistoryID, m.InternalDate.UTC(),
 			m.FromName, m.FromEmail, encodeList(m.ToEmails), encodeList(m.CcEmails),
 			m.Subject, m.Snippet, body, m.SizeBytes, encodeList(m.LabelIDs),
-			m.IsRead, m.IsOutgoing, m.IsDeleted, m.HasBody, m.SyncedAt.UTC(),
+			m.IsRead, m.IsOutgoing, m.IsDeleted, m.HasBody, m.BodyFetched, m.SyncedAt.UTC(),
 		)
 		if err != nil {
 			return err
@@ -291,7 +440,7 @@ func (d *DB) GetMessage(ctx context.Context, id string) (Message, error) {
 SELECT id, thread_id, history_id, internal_date,
        from_name, from_email, to_json(to_emails)::VARCHAR, to_json(cc_emails)::VARCHAR,
        subject, snippet, COALESCE(body, ''), size_bytes, to_json(label_ids)::VARCHAR,
-       is_read, is_outgoing, is_deleted, has_body, synced_at
+       is_read, is_outgoing, is_deleted, has_body, body_fetched, synced_at
 FROM messages WHERE id = ?
 `
 	var m Message
@@ -301,7 +450,7 @@ FROM messages WHERE id = ?
 		&m.ID, &m.ThreadID, &historyID, &m.InternalDate,
 		&m.FromName, &m.FromEmail, &toJSON, &ccJSON,
 		&m.Subject, &m.Snippet, &m.Body, &m.SizeBytes, &labelJSON,
-		&m.IsRead, &m.IsOutgoing, &m.IsDeleted, &m.HasBody, &m.SyncedAt,
+		&m.IsRead, &m.IsOutgoing, &m.IsDeleted, &m.HasBody, &m.BodyFetched, &m.SyncedAt,
 	)
 	if err != nil {
 		return Message{}, err
@@ -342,9 +491,13 @@ func (d *DB) ListMessages(ctx context.Context, f ListFilter) ([]Message, error) 
 		f.Before = q.Before
 	}
 
-	hasFTS, err := d.hasFTS(ctx)
-	if err != nil {
-		return nil, err
+	var hasFTS bool
+	if q.Text != "" {
+		ok, err := d.hasFTS(ctx)
+		if err != nil {
+			return nil, err
+		}
+		hasFTS = ok
 	}
 	short := utf8.RuneCountInString(q.Text) < 2
 	if q.Text != "" && hasFTS {
@@ -511,21 +664,29 @@ UPDATE messages SET label_ids = CAST(? AS VARCHAR[]), is_read = ? WHERE id = ?
 
 func (d *DB) UpdateBody(ctx context.Context, id, body string) error {
 	_, err := d.sql.ExecContext(ctx, `
-UPDATE messages SET body = ?, has_body = true, synced_at = ? WHERE id = ?
-`, body, time.Now().UTC(), id)
+UPDATE messages SET body = ?, has_body = (? <> ''), body_fetched = true, synced_at = ? WHERE id = ?
+`, body, body, time.Now().UTC(), id)
 	if err != nil {
 		return err
 	}
 	return refreshSearchTextTx(ctx, d.sql, []string{id})
 }
 
-func (d *DB) IDsWithoutBody(ctx context.Context, limit int) ([]string, error) {
+func (d *DB) IDsNeedingFetch(ctx context.Context, afterID string, limit int) ([]string, error) {
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := d.sql.QueryContext(ctx, `
-SELECT id FROM messages WHERE NOT has_body AND NOT is_deleted LIMIT ?
-`, limit)
+	q := `
+SELECT id FROM messages
+WHERE NOT COALESCE(body_fetched, false) AND NOT is_deleted`
+	args := make([]any, 0, 2)
+	if afterID != "" {
+		q += ` AND id > ?`
+		args = append(args, afterID)
+	}
+	q += ` ORDER BY id LIMIT ?`
+	args = append(args, limit)
+	rows, err := d.sql.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -634,20 +795,15 @@ func (d *DB) ClearState(ctx context.Context, key string) error {
 }
 
 func (d *DB) RebuildFTS(ctx context.Context) error {
-	_, err := d.sql.ExecContext(ctx, "INSTALL fts; LOAD fts;")
-	if err != nil {
-		return fmt.Errorf("load fts: %w", err)
-	}
-	_, err = d.sql.ExecContext(ctx, `
+	_, err := d.sql.ExecContext(ctx, `
 PRAGMA create_fts_index('messages', 'id', 'search_text', overwrite=1)
 `)
 	if err != nil {
-		return err
+		return fmt.Errorf("fts: %w", err)
 	}
 	if err := d.SetState(ctx, stateFTSIndex, ftsIndexVer); err != nil {
 		return err
 	}
-	d.ftsOK = true
 	return nil
 }
 
@@ -695,9 +851,6 @@ func refreshSearchTextTx(ctx context.Context, ex execer, ids []string) error {
 }
 
 func (d *DB) hasFTS(ctx context.Context) (bool, error) {
-	if d.ftsOK {
-		return true, nil
-	}
 	var n int
 	err := d.sql.QueryRowContext(ctx, `
 SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'fts_main_messages'
@@ -709,11 +862,7 @@ SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'fts_main_messages'
 	if err != nil {
 		return false, err
 	}
-	ok := n > 0 && ver == ftsIndexVer
-	if ok {
-		d.ftsOK = true
-	}
-	return ok, nil
+	return n > 0 && ver == ftsIndexVer, nil
 }
 
 func (d *DB) HasFTS(ctx context.Context) (bool, error) {
@@ -739,7 +888,7 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 			&m.ID, &m.ThreadID, &historyID, &m.InternalDate,
 			&m.FromName, &m.FromEmail, &toJSON, &ccJSON,
 			&m.Subject, &m.Snippet, &m.Body, &m.SizeBytes, &labelJSON,
-			&m.IsRead, &m.IsOutgoing, &m.IsDeleted, &m.HasBody, &m.SyncedAt,
+			&m.IsRead, &m.IsOutgoing, &m.IsDeleted, &m.HasBody, &m.BodyFetched, &m.SyncedAt,
 		); err != nil {
 			return nil, err
 		}

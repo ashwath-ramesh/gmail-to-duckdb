@@ -2,14 +2,19 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 func testDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "mail.duckdb"))
+	db, err := Open(filepath.Join(dbParent(t), "mail.duckdb"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,14 +228,14 @@ func TestStateAndMissingIDs(t *testing.T) {
 	}
 }
 
-func TestBodyAndIDsWithoutBody(t *testing.T) {
+func TestBodyAndIDsNeedingFetch(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	if err := db.UpsertMessages(ctx, []Message{sample("m1", at)}); err != nil {
 		t.Fatal(err)
 	}
-	ids, err := db.IDsWithoutBody(ctx, 10)
+	ids, err := db.IDsNeedingFetch(ctx, "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +259,7 @@ func TestBodyAndIDsWithoutBody(t *testing.T) {
 	if len(hits) != 1 || hits[0].ID != "m1" {
 		t.Fatalf("body search: %d", len(hits))
 	}
-	ids, err = db.IDsWithoutBody(ctx, 10)
+	ids, err = db.IDsNeedingFetch(ctx, "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,13 +412,103 @@ func TestEnsureFTS(t *testing.T) {
 	if err := db.SetState(ctx, stateFTSIndex, "old"); err != nil {
 		t.Fatal(err)
 	}
-	db.ftsOK = false
 	if err := db.EnsureFTS(ctx); err != nil {
 		t.Fatal(err)
 	}
 	ver, has, err := db.GetState(ctx, stateFTSIndex)
 	if err != nil || !has || ver != ftsIndexVer {
 		t.Fatalf("ver %q %v %v", ver, has, err)
+	}
+}
+
+func TestConcurrentHasFTSRebuildList(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	db := testDB(t)
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	msg := sample("m1", at)
+	msg.Subject = "pineapple note"
+	if err := db.UpsertMessages(ctx, []Message{msg}); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errc := make(chan error, 3)
+	start := make(chan struct{})
+	run := func(fn func() error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 8; i++ {
+				if err := fn(); err != nil {
+					errc <- err
+					return
+				}
+			}
+		}()
+	}
+	run(func() error {
+		_, err := db.HasFTS(ctx)
+		return err
+	})
+	run(func() error {
+		return db.RebuildFTS(ctx)
+	})
+	run(func() error {
+		hits, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "pineapple"})
+		if err != nil {
+			return err
+		}
+		if len(hits) != 1 || hits[0].ID != "m1" {
+			return errors.New("search lost seeded message")
+		}
+		return nil
+	})
+	close(start)
+	wg.Wait()
+	close(errc)
+	for err := range errc {
+		t.Fatal(err)
+	}
+}
+
+func TestHasFTSAfterAllowedDropFTSSchema(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	msg := sample("m1", at)
+	msg.Subject = "pineapple note"
+	if err := db.UpsertMessages(ctx, []Message{msg}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RebuildFTS(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := db.HasFTS(ctx)
+	if err != nil || !ok {
+		t.Fatalf("fts after rebuild %v %v", ok, err)
+	}
+	if _, err := db.QuerySQL(ctx, "DROP SCHEMA fts_main_messages CASCADE", true); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = db.HasFTS(ctx)
+	if err != nil || ok {
+		t.Fatalf("fts after drop %v %v", ok, err)
+	}
+	hits, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "pineapple"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].ID != "m1" {
+		t.Fatalf("like fallback after drop: %#v", ids(hits))
+	}
+	short, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(short) != 1 || short[0].ID != "m1" {
+		t.Fatalf("short query after drop: %#v", ids(short))
 	}
 }
 
@@ -524,36 +619,393 @@ func TestQuerySQLReadOnly(t *testing.T) {
 	}
 }
 
-func TestCheckSQL(t *testing.T) {
-	if err := CheckSQL("SELECT 1", false); err != nil {
+func TestQuerySQLGuards(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	if err := db.UpsertLabels(ctx, []Label{{ID: "INBOX", Name: "Inbox", Type: "system"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckSQL("-- comment\nSELECT 1", false); err != nil {
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := db.UpsertMessages(ctx, []Message{sample("m1", at)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckSQL("SELECT 1; DROP TABLE messages", false); err == nil {
+
+	mustLabels := func(t *testing.T) {
+		t.Helper()
+		m, err := db.LabelMap(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m["INBOX"] != "Inbox" {
+			t.Fatalf("labels lost: %#v", m)
+		}
+	}
+
+	if _, err := db.QuerySQL(ctx, `SELECT 1 AS "--"; DELETE FROM labels`, false); err == nil {
+		t.Fatal("expected exploit reject")
+	}
+	mustLabels(t)
+
+	if _, err := db.QuerySQL(ctx, `SELECT 1 AS "--"; DELETE FROM labels`, true); err == nil {
+		t.Fatal("expected multi-statement reject with --write")
+	}
+	mustLabels(t)
+
+	if _, err := db.QuerySQL(ctx, "SELECT 1; DROP TABLE labels", false); err == nil {
 		t.Fatal("expected multi-statement reject")
 	}
-	if err := CheckSQL("UPDATE messages SET subject = 'x'", false); err == nil {
+	mustLabels(t)
+
+	res, err := db.QuerySQL(ctx, `SELECT 1 AS "--", ';' AS semi, 'DELETE' AS w`, false)
+	if err != nil || len(res.Rows) != 1 {
+		t.Fatalf("quoted delimiters: %+v %v", res, err)
+	}
+	if _, err := db.QuerySQL(ctx, "-- comment\nSELECT 1", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.QuerySQL(ctx, "SELECT 1 /* block */", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.QuerySQL(ctx, "SELECT 1 /* outer /* nested */ */", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.QuerySQL(ctx, "PIVOT labels ON type USING count(id)", false); err == nil {
+		t.Fatal("expected dynamic PIVOT reject")
+	}
+	if _, err := db.QuerySQL(ctx, "SELECT * FROM messages WHERE subject = 'DELETE'", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.QuerySQL(ctx, "WITH x AS (SELECT id FROM messages) SELECT * FROM x", false); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, q := range []string{
+		"SHOW TABLES",
+		"DESCRIBE labels",
+		"DESC labels",
+		"SUMMARIZE labels",
+		"FROM labels",
+		"VALUES (1)",
+		"FROM labels PIVOT (count(id) FOR type IN ('system', 'user'))",
+		"EXPLAIN SELECT 1",
+		"EXPLAIN ANALYZE SELECT 1",
+	} {
+		if _, err := db.QuerySQL(ctx, q, false); err != nil {
+			t.Fatalf("read %q: %v", q, err)
+		}
+	}
+
+	if _, err := db.QuerySQL(ctx, "UPDATE messages SET subject = 'x'", false); err == nil {
 		t.Fatal("expected write reject")
 	}
-	if err := CheckSQL("UPDATE messages SET subject = 'x'", true); err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckSQL("WITH d AS (DELETE FROM messages RETURNING id) SELECT count(*) FROM d", false); err == nil {
+	if _, err := db.QuerySQL(ctx, "WITH d AS (DELETE FROM labels RETURNING id) SELECT count(*) FROM d", false); err == nil {
 		t.Fatal("expected mutating CTE reject")
 	}
-	if err := CheckSQL("EXPLAIN ANALYZE DELETE FROM messages", false); err == nil {
+	mustLabels(t)
+	if _, err := db.QuerySQL(ctx, "EXPLAIN ANALYZE DELETE FROM labels", false); err == nil {
 		t.Fatal("expected explain analyze write reject")
 	}
-	if err := CheckSQL("SELECT * FROM read_csv('/tmp/x.csv')", false); err == nil {
-		t.Fatal("expected file read reject")
+	mustLabels(t)
+
+	if _, err := db.QuerySQL(ctx, "", false); err == nil {
+		t.Fatal("expected empty reject")
 	}
-	if err := CheckSQL("SELECT * FROM messages WHERE subject = 'DELETE'", false); err != nil {
+	if _, err := db.QuerySQL(ctx, "   \n\t", false); err == nil {
+		t.Fatal("expected whitespace reject")
+	}
+	if _, err := db.QuerySQL(ctx, "SELECT 1\x00DELETE FROM labels", false); err == nil {
+		t.Fatal("expected NUL reject")
+	} else if !strings.Contains(err.Error(), "NUL") {
+		t.Fatalf("nul diagnostic: %v", err)
+	}
+	mustLabels(t)
+
+	if _, err := db.QuerySQL(ctx, "UPDATE messages SET subject = 'x'", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckSQL("WITH x AS (SELECT id FROM messages) SELECT * FROM x", false); err != nil {
+	if _, err := db.QuerySQL(ctx, "BEGIN", true); err == nil {
+		t.Fatal("expected transaction reject")
+	}
+	if _, err := db.QuerySQL(ctx, "CREATE SEQUENCE sql_seq", true); err != nil {
 		t.Fatal(err)
+	}
+	first, err := db.QuerySQL(ctx, "SELECT nextval('sql_seq')", true)
+	if err != nil || len(first.Rows) != 1 {
+		t.Fatalf("nextval write: %+v %v", first, err)
+	}
+	if _, err := db.QuerySQL(ctx, "SELECT nextval('sql_seq')", false); err == nil {
+		t.Fatal("expected nextval reject in read-only")
+	}
+	second, err := db.QuerySQL(ctx, "SELECT nextval('sql_seq')", true)
+	if err != nil || len(second.Rows) != 1 {
+		t.Fatalf("nextval after ro: %+v %v", second, err)
+	}
+	if second.Rows[0][0] != int64(2) && second.Rows[0][0] != int32(2) {
+		t.Fatalf("sequence advanced during read-only: first=%v second=%v", first.Rows[0][0], second.Rows[0][0])
+	}
+
+	csv := filepath.Join(t.TempDir(), "ok.csv")
+	if err := os.WriteFile(csv, []byte("n\n1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	readCSV := "SELECT * FROM read_csv('" + strings.ReplaceAll(csv, "'", "''") + "')"
+	if _, err := db.QuerySQL(ctx, readCSV, false); err == nil {
+		t.Fatal("expected external read reject")
+	}
+	if _, err := db.QuerySQL(ctx, readCSV, true); err == nil {
+		t.Fatal("expected external read reject with --write")
+	}
+	if _, err := os.Stat(csv); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.QuerySQL(ctx, "SET enable_external_access = true", true); err == nil {
+		t.Fatal("expected setting reject")
+	}
+	if _, err := db.QuerySQL(ctx, "SET lock_configuration = false", true); err == nil {
+		t.Fatal("expected setting reject")
+	}
+	if _, err := db.QuerySQL(ctx, readCSV, true); err == nil {
+		t.Fatal("external access must stay off")
+	}
+}
+
+func TestQuerySQLExplainAnalyzeBlockedSideEffects(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dir := t.TempDir()
+	copyPath := filepath.Join(dir, "explain_copy.csv")
+	attachPath := filepath.Join(dir, "explain_attach.duckdb")
+	csvPath := filepath.Join(dir, "sentinel.csv")
+	if err := os.WriteFile(csvPath, []byte("n\nEXPLAIN_CALL_SENTINEL\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	qCopy := "EXPLAIN ANALYZE COPY (SELECT 1 AS n) TO '" + strings.ReplaceAll(copyPath, "'", "''") + "'"
+	qAttach := "EXPLAIN ANALYZE ATTACH '" + strings.ReplaceAll(attachPath, "'", "''") + "' AS explain_extra"
+	qCall := "EXPLAIN ANALYZE CALL read_csv('" + strings.ReplaceAll(csvPath, "'", "''") + "')"
+
+	threadsBefore := currentSetting(t, db, "threads")
+	wantThreads := "7"
+	if threadsBefore == wantThreads {
+		wantThreads = "8"
+	}
+
+	if _, err := db.QuerySQL(ctx, qCopy, true); err == nil {
+		t.Fatal("expected EXPLAIN ANALYZE COPY error")
+	}
+	if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
+		t.Fatalf("copy target: %v", err)
+	}
+
+	if _, err := db.QuerySQL(ctx, qAttach, true); err == nil {
+		t.Fatal("expected EXPLAIN ANALYZE ATTACH error")
+	}
+	if _, err := os.Stat(attachPath); !os.IsNotExist(err) {
+		t.Fatalf("attach target: %v", err)
+	}
+	dbs, err := db.QuerySQL(ctx, "SELECT database_name FROM duckdb_databases()", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range dbs.StringRows() {
+		if len(row) > 0 && row[0] == "explain_extra" {
+			t.Fatal("EXPLAIN ANALYZE ATTACH must not attach a database")
+		}
+	}
+
+	if _, err := db.QuerySQL(ctx, "EXPLAIN ANALYZE SET threads = "+wantThreads, true); err == nil {
+		t.Fatal("expected EXPLAIN ANALYZE SET error")
+	}
+	if got := currentSetting(t, db, "threads"); got != threadsBefore {
+		t.Fatalf("EXPLAIN ANALYZE SET changed threads from %s to %s", threadsBefore, got)
+	}
+
+	if res, err := db.QuerySQL(ctx, qCall, true); err == nil {
+		t.Fatalf("expected EXPLAIN ANALYZE CALL read_csv error, got %+v", res)
+	}
+	if _, err := db.QuerySQL(ctx, "CALL duckdb_settings()", true); err == nil {
+		t.Fatal("expected bare CALL reject")
+	}
+}
+
+func TestQuerySQLExplainAnalyzeWriteDML(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	if err := db.UpsertLabels(ctx, []Label{{ID: "TMP", Name: "Tmp", Type: "user"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.QuerySQL(ctx, "EXPLAIN ANALYZE DELETE FROM labels WHERE id = 'TMP'", true); err != nil {
+		t.Fatal(err)
+	}
+	labels, err := db.LabelMap(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := labels["TMP"]; ok {
+		t.Fatal("EXPLAIN ANALYZE DELETE must remove TMP")
+	}
+	if _, err := db.QuerySQL(ctx, "EXPLAIN ANALYZE SELECT 1", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func currentSetting(t *testing.T, db *DB, name string) string {
+	t.Helper()
+	res, err := db.QuerySQL(context.Background(), "SELECT current_setting('"+name+"')", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := res.StringRows()
+	if len(rows) != 1 || len(rows[0]) != 1 {
+		t.Fatalf("setting %s: %+v", name, res)
+	}
+	return rows[0][0]
+}
+
+func TestQuerySQLConnRecover(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	if _, err := db.QuerySQL(ctx, "SELECT * FROM definitely_missing_table", false); err == nil {
+		t.Fatal("expected read error")
+	}
+	if _, err := db.QuerySQL(ctx, "SELECT 1 AS n", false); err != nil {
+		t.Fatal(err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := db.QuerySQL(canceled, "SELECT 1 AS n", false); err == nil {
+		t.Fatal("expected canceled context error")
+	}
+	if _, err := db.QuerySQL(ctx, "INSERT INTO labels(id, name, type) VALUES ('after_cancel', 'After', 'user')", true); err != nil {
+		t.Fatal(err)
+	}
+
+	slow, stop := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer stop()
+	_, err := db.QuerySQL(slow, "SELECT sum(i) FROM range(2000000000) t(i)", false)
+	if err == nil {
+		t.Fatal("expected cancellation")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("want cancel, got %v", err)
+	}
+	if _, err := db.QuerySQL(ctx, "INSERT INTO labels(id, name, type) VALUES ('after_timeout', 'After', 'user')", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFTSBootstrapOptional(t *testing.T) {
+	if err := bootstrapTrusted(failExec{needle: "fts"}, Options{}); err != nil {
+		t.Fatalf("fts must be optional: %v", err)
+	}
+	if err := bootstrapTrusted(failExec{needle: "ui"}, Options{DuckUI: true}); err == nil {
+		t.Fatal("expected duckdb ui failure")
+	}
+}
+
+func TestSQLUsableWhenFTSUnavailable(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(dbParent(t), "mail.duckdb")
+	db, err := openWith(path, Options{}, func(ex execer) execer {
+		return ftsBlock{ex}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.RebuildFTS(ctx); err == nil {
+		t.Fatal("expected fts unavailable")
+	}
+	if _, err := db.QuerySQL(ctx, "SELECT 1 AS n", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Coverage(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconnectAfterLock(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	c, err := db.sql.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discardConn(c)
+	if err := c.Close(); err != nil && !errors.Is(err, sql.ErrConnDone) {
+		t.Fatal(err)
+	}
+	if _, err := db.QuerySQL(ctx, "SELECT 1 AS n", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.QuerySQL(ctx, "INSERT INTO labels(id, name, type) VALUES ('reconn', 'R', 'user')", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.QuerySQL(ctx, "SET enable_external_access = true", true); err == nil {
+		t.Fatal("config must stay locked")
+	}
+	csv := filepath.Join(t.TempDir(), "ok.csv")
+	if err := os.WriteFile(csv, []byte("n\n1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	q := "SELECT * FROM read_csv('" + strings.ReplaceAll(csv, "'", "''") + "')"
+	if _, err := db.QuerySQL(ctx, q, true); err == nil {
+		t.Fatal("external access must stay off")
+	}
+}
+
+type failExec struct{ needle string }
+
+func (f failExec) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if strings.Contains(strings.ToLower(query), f.needle) {
+		return nil, errors.New(f.needle + " unavailable")
+	}
+	return stubResult{}, nil
+}
+
+type ftsBlock struct{ execer }
+
+func (f ftsBlock) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
+	if strings.Contains(strings.ToLower(q), "fts") {
+		return nil, errors.New("fts unavailable")
+	}
+	return f.execer.ExecContext(ctx, q, args...)
+}
+
+type stubResult struct{}
+
+func (stubResult) LastInsertId() (int64, error) { return 0, nil }
+func (stubResult) RowsAffected() (int64, error) { return 0, nil }
+
+func TestQuerySQLConcurrentWithStoreWrite(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	db := testDB(t)
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := db.UpsertMessages(ctx, []Message{sample("m1", at)}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 2)
+	go func() {
+		_, err := db.QuerySQL(ctx, "SELECT count(*) FROM messages", false)
+		done <- err
+	}()
+	go func() {
+		done <- db.UpsertMessages(ctx, []Message{sample("m2", at.Add(time.Hour))})
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal("timeout")
+		}
 	}
 }
 
@@ -561,7 +1013,7 @@ func TestCoverageAndSchemaVersion(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	v, ok, err := db.GetState(ctx, StateSchemaVersion)
-	if err != nil || !ok || v != "1" {
+	if err != nil || !ok || v != "2" {
 		t.Fatalf("schema version %q %v %v", v, ok, err)
 	}
 	c, err := db.Coverage(ctx)

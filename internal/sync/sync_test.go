@@ -5,11 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/gmail"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 )
 
@@ -25,6 +28,13 @@ type fakeAPI struct {
 	raw          map[string][]byte
 	fullRaw      map[string][]byte
 	fullErr      error
+	failAfter    int
+	maxFull      int
+	fullBatches  int
+	blockFull    bool
+	enteredFull  chan struct{}
+	releaseFull  chan struct{}
+	extraFull    [][]byte
 	gets         []string
 }
 
@@ -62,9 +72,24 @@ func (f *fakeAPI) History(ctx context.Context, startID uint64, pageToken string)
 	return f.historyPages[i], nil
 }
 
-func (f *fakeAPI) BatchGet(_ context.Context, ids []string, format string) ([][]byte, error) {
-	if format == "full" && f.fullErr != nil {
-		return nil, f.fullErr
+func (f *fakeAPI) BatchGet(ctx context.Context, ids []string, format string) ([][]byte, error) {
+	if format == "full" {
+		f.signalFullEntered()
+		if f.blockFull {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-f.releaseFull:
+				return nil, errors.New("full fetch released")
+			}
+		}
+		f.fullBatches++
+		if f.maxFull > 0 && f.fullBatches > f.maxFull {
+			return nil, errors.New("full fetch cap")
+		}
+		if f.fullErr != nil && (f.failAfter == 0 || f.fullBatches > f.failAfter) {
+			return nil, f.fullErr
+		}
 	}
 	src := f.raw
 	if format == "full" && f.fullRaw != nil {
@@ -77,7 +102,21 @@ func (f *fakeAPI) BatchGet(_ context.Context, ids []string, format string) ([][]
 			out = append(out, b)
 		}
 	}
+	if format == "full" && len(f.extraFull) > 0 {
+		out = append(out, f.extraFull...)
+	}
 	return out, nil
+}
+
+func (f *fakeAPI) signalFullEntered() {
+	if f.enteredFull == nil {
+		return
+	}
+	select {
+	case <-f.enteredFull:
+	default:
+		close(f.enteredFull)
+	}
 }
 
 func (f *fakeAPI) Get(_ context.Context, id, format string) ([]byte, error) {
@@ -136,7 +175,16 @@ func b64(s string) string {
 
 func openTest(t *testing.T) (*store.DB, *Runner, *fakeAPI) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "mail.duckdb"))
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		dir = filepath.Join(dir, "db")
+		if err := privfile.MkdirPrivate(dir); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(dir, "mail.duckdb"))
 	if err != nil {
 		t.Fatal(err)
 	}

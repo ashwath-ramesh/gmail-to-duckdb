@@ -4,18 +4,31 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 )
 
 func seedDB(t *testing.T) string {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "mail.duckdb")
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		dir = filepath.Join(dir, "db")
+		if err := privfile.MkdirPrivate(dir); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "mail.duckdb")
 	db, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -54,12 +67,33 @@ func TestSQLJSONAndReadOnly(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
-	if env.SQL == nil || env.ResultCount != 1 || env.UntrustedContent {
+	if env.SQL == nil || env.ResultCount != 1 || !env.UntrustedContent {
 		t.Fatalf("%+v", env)
+	}
+	if len(env.UntrustedFields) != 1 || env.UntrustedFields[0] != "n" {
+		t.Fatalf("fields %#v", env.UntrustedFields)
+	}
+	if fmt.Sprint(env.SQL.Rows[0][0]) != "1" {
+		t.Fatalf("payload %#v", env.SQL.Rows)
 	}
 	out.Reset()
 	if err := run([]string{"gmail-to-duckdb", "sql", "--db", dbPath, "DELETE FROM messages"}, strings.NewReader(""), &out, &out); err == nil {
 		t.Fatal("expected write reject")
+	}
+}
+
+func TestSQLExploitDoesNotDelete(t *testing.T) {
+	dbPath := seedDB(t)
+	var out bytes.Buffer
+	if err := run([]string{"gmail-to-duckdb", "sql", "--db", dbPath, `SELECT 1 AS "--"; DELETE FROM messages`}, strings.NewReader(""), &out, &out); err == nil {
+		t.Fatal("expected exploit reject")
+	}
+	out.Reset()
+	if err := run([]string{"gmail-to-duckdb", "sql", "--db", dbPath, "SELECT id FROM messages"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "m1") {
+		t.Fatalf("data lost: %s", out.String())
 	}
 }
 
@@ -90,7 +124,7 @@ func TestStatusSearchGetSchema(t *testing.T) {
 		if err := json.Unmarshal(out.Bytes(), &env); err != nil {
 			t.Fatalf("%v: %v %s", args, err, out.String())
 		}
-		if env.SchemaVersion != 1 {
+		if env.SchemaVersion != 2 {
 			t.Fatalf("%v schema %d", args, env.SchemaVersion)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 )
 
 var usage = `gmail-to-duckdb — sync Gmail into a local DuckDB file
@@ -20,7 +21,7 @@ Commands:
   search QUERY [--json]       Search messages
   get MESSAGE_ID [--body]     Fetch one message
   schema [--json]             Database schema
-  sql [--write] [--json]      Run SQL (read-only by default)
+  sql [--write] [--json]      Run SQL (read-only; --write is database-only)
 
 Flags (most commands):
   --db PATH            DuckDB file (default mail.duckdb)
@@ -35,15 +36,17 @@ func itoa(n int) string {
 }
 
 func main() {
+	privfile.LockDownProcess()
 	if err := run(os.Args, os.Stdin, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		writeDiag(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) < 2 {
-		return fmt.Errorf("%s", usage)
+		fmt.Fprint(stderr, usage)
+		return fmt.Errorf("missing command")
 	}
 	switch args[1] {
 	case "sync":
@@ -70,6 +73,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		fmt.Fprint(stdout, usage)
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q\n%s", args[1], usage)
+		fmt.Fprint(stderr, usage)
+		return fmt.Errorf("unknown command %q", args[1])
 	}
 }

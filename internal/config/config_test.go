@@ -20,15 +20,31 @@ func TestWriteAndLoad(t *testing.T) {
 	if err := Write(want); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(Path())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %o", info.Mode().Perm())
-	}
+	assertPrivateFile(t, Path())
 	got := Load()
 	if got.DB != want.DB || got.Credentials != want.Credentials || got.OAuthPort != 9 || got.Port != "9090" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestWriteReplacesPermissiveFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := os.MkdirAll(Dir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path(), []byte(`{"db":"old"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := makePermissive(Path()); err != nil {
+		t.Fatal(err)
+	}
+	want := Config{DB: "/tmp/mail.duckdb", Credentials: "/tmp/credentials.json", OAuthPort: 9, Port: "9090"}
+	if err := Write(want); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivateFile(t, Path())
+	got := Load()
+	if got.DB != want.DB {
 		t.Fatalf("%+v", got)
 	}
 }
