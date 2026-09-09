@@ -30,7 +30,15 @@ You do not need a Go toolchain for a normal install.
 
 ```bash
 brew tap ashwath-ramesh/gmail-to-duckdb https://github.com/ashwath-ramesh/gmail-to-duckdb
+brew trust ashwath-ramesh/gmail-to-duckdb
 brew install gmail-to-duckdb
+```
+
+Later:
+
+```bash
+brew update
+brew upgrade gmail-to-duckdb
 ```
 
 **Build from source**
