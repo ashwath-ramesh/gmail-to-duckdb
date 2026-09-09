@@ -76,7 +76,7 @@ gmail-to-duckdb doctor
 gmail-to-duckdb serve --sync-every 5m
 ```
 
-The first run opens a localhost OAuth page. The callback is always `http://127.0.0.1:41807/`. The token is stored next to the database as `*.token.json`. The token is not stored in DuckDB.
+The first run opens a localhost OAuth page. The callback is `http://127.0.0.1:41807/` unless you set `--oauth-port`. Each sign-in creates a new random `state` and a PKCE S256 challenge. The callback must send exactly one matching `state`. A missing, reused, wrong, or duplicate `state` is rejected. A callback may send one `code` or one `error`, not both. A malformed query is rejected. Sign-in stays open after an invalid callback. The token exchange sends the matching `code_verifier`. The token is stored next to the database as `*.token.json`. The token is not stored in DuckDB.
 
 Secret files (`credentials.json` copy, `*.token.json`, `*.serve.json`, and `config.json`) are written as private files:
 
@@ -94,7 +94,7 @@ If the CLI runs on a remote host and you sign in on a laptop, open the tunnel **
 ssh -L 41807:127.0.0.1:41807 USER@REMOTE
 ```
 
-Or copy the `http://127.0.0.1:41807/?code=...` URL from the laptop and paste it into the remote prompt.
+Or copy the redirect URL from the laptop and paste it into the remote prompt. The URL must use `127.0.0.1` and the listen port. It must include the same `state`. It must not include a user name or a fragment. You can also paste the `code=` value or the raw code. The exchange is bound to this sign-in by PKCE. If the paste includes `state`, including a percent-encoded `state` key, it must match. A URL on another host is rejected.
 
 Flags override the config file. If no config file exists, the working directory defaults stay `mail.duckdb` and `credentials.json`.
 
