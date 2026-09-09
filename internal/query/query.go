@@ -171,10 +171,8 @@ func SQL(ctx context.Context, db *store.DB, query string, allowWrite bool) (Enve
 	}
 	env.SQL = &SQLPayload{Columns: res.Columns, ColumnTypes: res.ColumnTypes, Rows: res.Rows}
 	env.ResultCount = len(res.Rows)
-	if fields := sqlUntrustedFields(query, res.Columns); len(fields) > 0 {
-		env.UntrustedContent = true
-		env.UntrustedFields = fields
-	}
+	env.UntrustedContent = true
+	env.UntrustedFields = append([]string{}, res.Columns...)
 	return env, nil
 }
 
@@ -183,25 +181,6 @@ var mailTextFields = []string{"subject", "snippet", "body", "from_name", "from_e
 func MarkMailUntrusted(env *Envelope) {
 	env.UntrustedContent = true
 	env.UntrustedFields = append([]string{}, mailTextFields...)
-}
-
-func sqlUntrustedFields(query string, cols []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(s string) {
-		low := strings.ToLower(s)
-		for _, f := range mailTextFields {
-			if strings.Contains(low, f) && !seen[f] {
-				seen[f] = true
-				out = append(out, f)
-			}
-		}
-	}
-	add(query)
-	for _, c := range cols {
-		add(c)
-	}
-	return out
 }
 
 func MessageFromStore(m store.Message, includeBody bool) Message {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -66,8 +67,14 @@ func TestSQLJSONAndReadOnly(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
-	if env.SQL == nil || env.ResultCount != 1 || env.UntrustedContent {
+	if env.SQL == nil || env.ResultCount != 1 || !env.UntrustedContent {
 		t.Fatalf("%+v", env)
+	}
+	if len(env.UntrustedFields) != 1 || env.UntrustedFields[0] != "n" {
+		t.Fatalf("fields %#v", env.UntrustedFields)
+	}
+	if fmt.Sprint(env.SQL.Rows[0][0]) != "1" {
+		t.Fatalf("payload %#v", env.SQL.Rows)
 	}
 	out.Reset()
 	if err := run([]string{"gmail-to-duckdb", "sql", "--db", dbPath, "DELETE FROM messages"}, strings.NewReader(""), &out, &out); err == nil {

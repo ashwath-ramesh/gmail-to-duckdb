@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -47,6 +48,52 @@ func TestCLIDialsServe(t *testing.T) {
 	}
 	if env.SchemaVersion != 1 {
 		t.Fatalf("%s", out.String())
+	}
+	if env.UntrustedContent {
+		t.Fatal("remote status must stay trusted")
+	}
+	out.Reset()
+	if err := run([]string{"gmail-to-duckdb", "schema", "--db", dbPath, "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.UntrustedContent {
+		t.Fatal("remote schema must stay trusted")
+	}
+	out.Reset()
+	if err := run([]string{"gmail-to-duckdb", "sql", "--db", dbPath, "--json", "SELECT 1 AS n"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.SQL == nil || env.ResultCount != 1 || !env.UntrustedContent {
+		t.Fatalf("%s", out.String())
+	}
+	if len(env.UntrustedFields) != 1 || env.UntrustedFields[0] != "n" {
+		t.Fatalf("fields %#v", env.UntrustedFields)
+	}
+	if fmt.Sprint(env.SQL.Rows[0][0]) != "1" {
+		t.Fatalf("payload %#v", env.SQL.Rows)
+	}
+	out.Reset()
+	if err := run([]string{"gmail-to-duckdb", "sql", "--db", dbPath, "--json", "SELECT row_to_json(messages) AS data FROM messages"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.SQL == nil || !env.UntrustedContent || len(env.UntrustedFields) != 1 || env.UntrustedFields[0] != "data" {
+		t.Fatalf("%s", out.String())
+	}
+	raw, err := json.Marshal(env.SQL.Rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "invoice") || !strings.Contains(string(raw), "secret") {
+		t.Fatalf("payload %s", raw)
 	}
 }
 

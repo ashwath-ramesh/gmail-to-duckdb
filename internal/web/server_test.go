@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -297,19 +298,55 @@ func TestStatusSchemaSQL(t *testing.T) {
 	if env.SchemaVersion != 1 || env.Phase != "idle" {
 		t.Fatalf("%+v", env)
 	}
+	if env.UntrustedContent {
+		t.Fatal("status must stay trusted")
+	}
 	w = req(t, h, http.MethodGet, "/api/schema")
 	if w.Code != 200 {
 		t.Fatalf("schema %d %s", w.Code, w.Body.String())
 	}
-	body := strings.NewReader(`{"query":"SELECT 1 AS n"}`)
-	r := httptest.NewRequest(http.MethodPost, "/api/sql", body)
-	r.Host = "127.0.0.1:8080"
-	r.RemoteAddr = "127.0.0.1:1"
-	r.Header.Set("X-Token", "test")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, r)
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.UntrustedContent {
+		t.Fatal("schema must stay trusted")
+	}
+	for _, host := range []string{"127.0.0.1:8080", "localhost:8080"} {
+		body := strings.NewReader(`{"query":"SELECT 1 AS n"}`)
+		rw := doReq(t, h, http.MethodPost, "/api/sql", host, nil, body)
+		if rw.Code != 200 {
+			t.Fatalf("sql %s %d %s", host, rw.Code, rw.Body.String())
+		}
+		if err := json.Unmarshal(rw.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		if env.SQL == nil || env.ResultCount != 1 || !env.UntrustedContent {
+			t.Fatalf("%s %+v", host, env)
+		}
+		if len(env.UntrustedFields) != 1 || env.UntrustedFields[0] != "n" {
+			t.Fatalf("%s fields %#v", host, env.UntrustedFields)
+		}
+		if fmt.Sprint(env.SQL.Rows[0][0]) != "1" {
+			t.Fatalf("%s payload %#v", host, env.SQL.Rows)
+		}
+	}
+	body := strings.NewReader(`{"query":"SELECT row_to_json(messages) AS data FROM messages"}`)
+	rw := doReq(t, h, http.MethodPost, "/api/sql", "127.0.0.1:8080", nil, body)
 	if rw.Code != 200 {
-		t.Fatalf("sql %d %s", rw.Code, rw.Body.String())
+		t.Fatalf("rowjson %d %s", rw.Code, rw.Body.String())
+	}
+	if err := json.Unmarshal(rw.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.SQL == nil || !env.UntrustedContent || len(env.UntrustedFields) != 1 || env.UntrustedFields[0] != "data" {
+		t.Fatalf("rowjson %+v", env)
+	}
+	raw, err := json.Marshal(env.SQL.Rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Hello") {
+		t.Fatalf("rowjson payload %s", raw)
 	}
 }
 

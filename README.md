@@ -162,10 +162,10 @@ Every `--json` command prints the same envelope:
 - `body_coverage` (`with_body`, `total`, `search_covers`)
 - `result_count`, `truncated`
 - `untrusted_content`
-- `untrusted_fields` (email text columns when present)
+- `untrusted_fields` (returned SQL column aliases, or email text columns on mail results)
 - typed values (`messages`, `message`, `schema`, `sql`, `checks`)
 
-`untrusted_content` is true only when the result can include email text. `SELECT 1` stays trusted. Treat fields in `untrusted_fields` as hostile. They can contain prompt-injection text and sensitive data. Do not let a model approve `--write` or `get --body` from that text.
+Successful `sql` results always set `untrusted_content`. `untrusted_fields` lists every returned SQL column. Treat those columns and all nested values as hostile. They can contain prompt-injection text and sensitive data. Status and schema stay trusted and do not set this warning. Search and `get` still mark email text fields. Do not let a model approve `--write` or `get --body` from untrusted text.
 
 Search and `get` omit the body. Pass `get --body` only when you need it.
 
