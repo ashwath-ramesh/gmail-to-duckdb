@@ -1,6 +1,6 @@
 module github.com/ashwath-ramesh/gmail-to-duckdb
 
-go 1.26.5
+go 1.26.8
 
 require (
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
