@@ -34,6 +34,10 @@ func makePermissive(path string) error {
 	return os.Chmod(path, 0o644)
 }
 
+func makeDirPermissive(path string) error {
+	return os.Chmod(path, 0o755)
+}
+
 func assertStillPermissive(t *testing.T, path string) {
 	t.Helper()
 	info, err := os.Lstat(path)

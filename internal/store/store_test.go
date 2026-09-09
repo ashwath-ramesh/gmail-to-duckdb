@@ -13,7 +13,7 @@ import (
 
 func testDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "mail.duckdb"))
+	db, err := Open(filepath.Join(dbParent(t), "mail.duckdb"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -721,7 +721,7 @@ func TestFTSBootstrapOptional(t *testing.T) {
 
 func TestSQLUsableWhenFTSUnavailable(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "mail.duckdb")
+	path := filepath.Join(dbParent(t), "mail.duckdb")
 	db, err := openWith(path, Options{}, func(ex execer) execer {
 		return ftsBlock{ex}
 	})

@@ -61,3 +61,15 @@ func TestCLIRefuseStaleServe(t *testing.T) {
 		t.Fatalf("err %v out %s", err, out.String())
 	}
 }
+
+func TestCLIRefuseUnreadableServe(t *testing.T) {
+	dbPath := seedDB(t)
+	if err := os.Mkdir(web.ServePath(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := run([]string{"gmail-to-duckdb", "status", "--db", dbPath, "--json"}, strings.NewReader(""), &out, &out)
+	if err == nil || !strings.Contains(err.Error(), "unreadable") {
+		t.Fatalf("err %v out %s", err, out.String())
+	}
+}

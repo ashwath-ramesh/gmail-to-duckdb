@@ -2,16 +2,28 @@ package query
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 )
 
 func testDB(t *testing.T) *store.DB {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "mail.duckdb"))
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		dir = filepath.Join(dir, "db")
+		if err := privfile.MkdirPrivate(dir); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(dir, "mail.duckdb"))
 	if err != nil {
 		t.Fatal(err)
 	}

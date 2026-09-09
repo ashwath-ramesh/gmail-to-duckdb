@@ -187,3 +187,12 @@ A later MCP server can wrap the same operations. Do not parse the human table ou
 - The HTTP UI listens on loopback.
 - Keep `credentials.json`, `*.token.json`, `*.serve.json`, and `*.duckdb` out of git.
 - Secret files are owner-only. Unix uses `0600`. Windows uses current-user and SYSTEM ACLs.
+- The process sets Unix umask `077` once at start. It does not restore the previous umask.
+- The database path stays where you set it. The tool does not move the file. The path is a filesystem path. A NUL byte, DSN options after `?`, or an in-memory URL is a startup error. A Windows drive colon is allowed.
+- Before DuckDB opens the mailbox, the tool hardens an existing database and known WAL sidecars (`.wal`, `.wal.checkpoint`, `.wal.recovery`) when they are regular files you own. It does not delete WAL files. A symlink or a file you do not own is a startup error.
+- DuckDB temp and spill files use a private directory next to the database (`*.duckdb.tmp`). Existing files in that directory are made private. A symlink or other non-regular entry in that directory is a startup error. The tool does not follow or delete those entries, and it does not change files outside that directory.
+- New database files use mode `0600`. New private directories use mode `0700`. Windows uses current-user and SYSTEM ACLs, with inheritance on those directories, before DuckDB creates files.
+- Unix accepts a custom parent that is only traversable (mode `0755`) because umask `077` still creates private files. A parent that is writable by group or other is refused. The tool does not chmod a custom directory.
+- Windows requires a private inherited parent (current user and SYSTEM only) so DuckDB-created files stay private. The parent must inherit current-user protection to files and subdirectories. An inherit-only ACE for another trustee is refused. A custom unsafe parent is refused. `init` hardens the configured app config and data directories only.
+- Windows also accepts the process token owner (often Administrators when the process is elevated) together with a tight DACL (current user, SYSTEM, and that token owner only). It does not trust an Admin-owned file that allows other trustees.
+- A serve file that exists but is unreadable or unsafe is a hard error. The tool does not fall back to opening the database.

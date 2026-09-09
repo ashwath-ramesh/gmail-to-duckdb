@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -45,6 +46,28 @@ func TestInitAndDoctor(t *testing.T) {
 	}
 	if len(names) < 5 {
 		t.Fatalf("checks %#v", names)
+	}
+}
+
+func TestInitHardensExistingDataDir(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dir := config.DataDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), "credentials.json")
+	if err := os.WriteFile(src, []byte(`{"installed":{"client_id":"x","client_secret":"y"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(src, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := privfile.CheckDir(dir); err != nil {
+		t.Fatalf("init did not harden data dir: %v", err)
 	}
 }
 
@@ -184,7 +207,16 @@ func TestDoctorAcceptsPrivateToken(t *testing.T) {
 }
 
 func TestDoctorStaleServeDoesNotOpenDB(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "mail.duckdb")
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		dir = filepath.Join(dir, "db")
+		if err := privfile.MkdirPrivate(dir); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "mail.duckdb")
 	db, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -211,4 +243,37 @@ func TestDoctorStaleServeDoesNotOpenDB(t *testing.T) {
 	if !dbCheck {
 		t.Fatal("missing database check")
 	}
+}
+
+func TestDoctorUnreadableServeDoesNotOpenDB(t *testing.T) {
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		dir = filepath.Join(dir, "db")
+		if err := privfile.MkdirPrivate(dir); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "mail.duckdb")
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(web.ServePath(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := Doctor(context.Background(), config.Config{DB: dbPath, Port: "9090", OAuthPort: 41807})
+	for _, c := range env.Checks {
+		if c.Name == "database" {
+			if c.OK || !strings.Contains(c.Detail, "unreadable") {
+				t.Fatalf("%+v", c)
+			}
+			return
+		}
+	}
+	t.Fatal("missing database check")
 }

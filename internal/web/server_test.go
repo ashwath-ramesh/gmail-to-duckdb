@@ -6,12 +6,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	mailsync "github.com/ashwath-ramesh/gmail-to-duckdb/internal/sync"
@@ -19,7 +22,16 @@ import (
 
 func testServer(t *testing.T) (*Server, *store.DB) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "mail.duckdb"))
+	dir := t.TempDir()
+	if goruntime.GOOS == "windows" {
+		dir = filepath.Join(dir, "db")
+		if err := privfile.MkdirPrivate(dir); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(dir, "mail.duckdb"))
 	if err != nil {
 		t.Fatal(err)
 	}

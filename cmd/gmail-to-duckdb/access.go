@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
@@ -16,6 +17,8 @@ func withAccess(dbPath string, fn func(query.Access) error) error {
 		}
 		defer c.Close()
 		return fn(c)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("serve file present but unreadable: %w", err)
 	}
 	db, err := store.Open(dbPath)
 	if err != nil {

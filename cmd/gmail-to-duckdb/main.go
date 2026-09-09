@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 )
 
 var usage = `gmail-to-duckdb — sync Gmail into a local DuckDB file
@@ -35,6 +36,7 @@ func itoa(n int) string {
 }
 
 func main() {
+	privfile.LockDownProcess()
 	if err := run(os.Args, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

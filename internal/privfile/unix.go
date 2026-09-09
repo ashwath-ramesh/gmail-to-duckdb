@@ -69,6 +69,67 @@ func hardenPath(path string) error {
 	return nil
 }
 
+func lockDown() {
+	syscall.Umask(0o077)
+}
+
+func checkDir(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	return checkDirInfo(fi)
+}
+
+func hardenDir(path string) error {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return fmt.Errorf("path is a symlink")
+		}
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if err := checkDirOwner(fi); err != nil {
+		return err
+	}
+	if err := f.Chmod(0o700); err != nil {
+		return fmt.Errorf("tighten directory permissions: %w", err)
+	}
+	return nil
+}
+
+func checkDirInfo(fi os.FileInfo) error {
+	if err := checkDirOwner(fi); err != nil {
+		return err
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("directory mode %o allows access to others", fi.Mode().Perm())
+	}
+	return nil
+}
+
+func checkDirOwner(fi os.FileInfo) error {
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("path is a symlink")
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("path is not a directory")
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("owner check unavailable")
+	}
+	if st.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("directory owner is not the current user")
+	}
+	return nil
+}
+
 func mkdirPrivate(dir string) error {
 	dir = filepath.Clean(dir)
 	if dir == "." || dir == "" {

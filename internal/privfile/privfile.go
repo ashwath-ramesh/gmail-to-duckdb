@@ -7,7 +7,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
+
+var lockDownOnce sync.Once
+
+// LockDownProcess sets a restrictive process umask once on Unix.
+// It does not restore the previous umask.
+// It is a no-op on Windows.
+func LockDownProcess() {
+	lockDownOnce.Do(lockDown)
+}
 
 // Write writes data to path as a private regular file.
 // It replaces an existing regular file.
@@ -60,6 +70,24 @@ func MkdirPrivate(dir string) error {
 		return nil
 	}
 	return mkdirPrivate(dir)
+}
+
+// CheckDir reports whether path is a private directory for the current user.
+// It does not follow a symlink and does not change the directory.
+func CheckDir(path string) error {
+	if path == "" {
+		return fmt.Errorf("empty path")
+	}
+	return checkDir(path)
+}
+
+// HardenDir sets owner-only permissions on an existing directory.
+// It does not follow a symlink and does not change an unrelated parent.
+func HardenDir(path string) error {
+	if path == "" {
+		return fmt.Errorf("empty path")
+	}
+	return hardenDir(path)
 }
 
 func rejectBadDest(path string) error {

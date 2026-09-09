@@ -31,6 +31,10 @@ func makePermissive(path string) error {
 	return grantWorldRead(path)
 }
 
+func makeDirPermissive(path string) error {
+	return grantWorldInherit(path)
+}
+
 func assertStillPermissive(t *testing.T, path string) {
 	t.Helper()
 	if err := Check(path); err == nil {
@@ -80,6 +84,9 @@ func assertNewAppDirPrivate(t *testing.T, dir string) {
 	if !info.IsDir() {
 		t.Fatal("not a directory")
 	}
+	if err := CheckDir(dir); err != nil {
+		t.Fatal(err)
+	}
 	if err := assertProtectedDirACL(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -93,6 +100,74 @@ func assertNewAppDirPrivate(t *testing.T, dir string) {
 	if err := assertOwnerSystemACL(child); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestCheckDirRejectsInheritOnlyWorld(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := MkdirPrivate(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := grantPrivateSelfWorldInheritOnly(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDir(dir); err == nil {
+		t.Fatal("expected inherit-only world reject")
+	}
+}
+
+func TestCheckDirRejectsNoInherit(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := MkdirPrivate(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := grantSelfOnlyPrivate(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDir(dir); err == nil {
+		t.Fatal("expected missing inherit reject")
+	}
+}
+
+func TestCheckDirRejectsFileOnlyInherit(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := MkdirPrivate(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := grantUserInherit(dir, windows.OBJECT_INHERIT_ACE|windows.NO_PROPAGATE_INHERIT_ACE); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDir(dir); err == nil {
+		t.Fatal("expected file-only inherit reject")
+	}
+}
+
+func TestCheckDirRejectsNoPropagateInherit(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := MkdirPrivate(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := grantUserInherit(dir, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT|windows.NO_PROPAGATE_INHERIT_ACE); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDir(dir); err == nil {
+		t.Fatal("expected no-propagate inherit reject")
+	}
+}
+
+func TestCheckSucceedsWhileWriteHandleHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secret.json")
+	if err := Write(path, []byte(`{"v":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	f, err := openAppWrite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := Check(path); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivate(t, path)
 }
 
 func TestReplaceWhileReadHandleHeld(t *testing.T) {
@@ -155,6 +230,79 @@ func TestCheckRejectsInheritedWorldACL(t *testing.T) {
 	if err := Check(path); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func grantSelfOnlyPrivate(dir string) error {
+	return grantUserInherit(dir, 0)
+}
+
+func grantPrivateSelfWorldInheritOnly(dir string) error {
+	user, system, world, err := dirACLSIDs()
+	if err != nil {
+		return err
+	}
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	pinner.Pin(user)
+	pinner.Pin(system)
+	pinner.Pin(world)
+	return setDirACL(dir, []windows.EXPLICIT_ACCESS{
+		aceFor(user, windows.GENERIC_ALL, 0, windows.TRUSTEE_IS_USER),
+		aceFor(system, windows.GENERIC_ALL, 0, windows.TRUSTEE_IS_WELL_KNOWN_GROUP),
+		aceFor(world, windows.GENERIC_READ, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT|windows.INHERIT_ONLY_ACE, windows.TRUSTEE_IS_WELL_KNOWN_GROUP),
+	})
+}
+
+func grantUserInherit(dir string, inherit uint32) error {
+	user, system, _, err := dirACLSIDs()
+	if err != nil {
+		return err
+	}
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	pinner.Pin(user)
+	pinner.Pin(system)
+	return setDirACL(dir, []windows.EXPLICIT_ACCESS{
+		aceFor(user, windows.GENERIC_ALL, inherit, windows.TRUSTEE_IS_USER),
+		aceFor(system, windows.GENERIC_ALL, inherit, windows.TRUSTEE_IS_WELL_KNOWN_GROUP),
+	})
+}
+
+func dirACLSIDs() (user, system, world *windows.SID, err error) {
+	user, err = currentUserSID()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	system, err = windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	world, err = windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return user, system, world, nil
+}
+
+func aceFor(sid *windows.SID, access windows.ACCESS_MASK, inherit uint32, kind windows.TRUSTEE_TYPE) windows.EXPLICIT_ACCESS {
+	return windows.EXPLICIT_ACCESS{
+		AccessPermissions: access,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       inherit,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  kind,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}
+}
+
+func setDirACL(dir string, entries []windows.EXPLICIT_ACCESS) error {
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }
 
 func grantWorldRead(path string) error {
@@ -231,6 +379,26 @@ func openAppRead(path string) (*os.File, error) {
 	return os.NewFile(uintptr(h), path), nil
 }
 
+func openAppWrite(path string) (*os.File, error) {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	h, err := windows.CreateFile(
+		p,
+		windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(h), path), nil
+}
+
 func aclSnapshot(path string) (string, error) {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -240,11 +408,7 @@ func aclSnapshot(path string) (string, error) {
 }
 
 func assertProtectedDirACL(path string) error {
-	user, err := currentUserSID()
-	if err != nil {
-		return err
-	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	user, system, def, err := aclPrincipalSIDs()
 	if err != nil {
 		return err
 	}
@@ -260,14 +424,17 @@ func assertProtectedDirACL(path string) error {
 		return fmt.Errorf("dacl not protected")
 	}
 	owner, _, err := sd.Owner()
-	if err != nil || owner == nil || !owner.Equals(user) {
+	if err != nil || owner == nil {
+		return fmt.Errorf("owner is not current user")
+	}
+	if err := ownerAllowed(owner); err != nil {
 		return fmt.Errorf("owner is not current user")
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil || dacl == nil {
 		return fmt.Errorf("missing dacl")
 	}
-	seenUser := false
+	seenAccess := false
 	seenSystem := false
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
@@ -279,26 +446,22 @@ func assertProtectedDirACL(path string) error {
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		switch {
-		case sid.Equals(user):
-			seenUser = true
+		case sid.Equals(user), sid.Equals(def):
+			seenAccess = true
 		case sid.Equals(system):
 			seenSystem = true
 		default:
 			return fmt.Errorf("unexpected trustee %s", sid)
 		}
 	}
-	if !seenUser || !seenSystem {
+	if !seenAccess || !seenSystem {
 		return fmt.Errorf("missing current-user or SYSTEM ACE")
 	}
 	return nil
 }
 
 func assertOwnerSystemACL(path string) error {
-	user, err := currentUserSID()
-	if err != nil {
-		return err
-	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	user, system, def, err := aclPrincipalSIDs()
 	if err != nil {
 		return err
 	}
@@ -310,14 +473,17 @@ func assertOwnerSystemACL(path string) error {
 	if err != nil {
 		return err
 	}
-	if owner == nil || !owner.Equals(user) {
+	if owner == nil {
+		return fmt.Errorf("owner is not current user")
+	}
+	if err := ownerAllowed(owner); err != nil {
 		return fmt.Errorf("owner is not current user")
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil || dacl == nil {
 		return fmt.Errorf("missing dacl")
 	}
-	seenUser := false
+	seenAccess := false
 	seenSystem := false
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
@@ -332,15 +498,15 @@ func assertOwnerSystemACL(path string) error {
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		switch {
-		case sid.Equals(user):
-			seenUser = true
+		case sid.Equals(user), sid.Equals(def):
+			seenAccess = true
 		case sid.Equals(system):
 			seenSystem = true
 		default:
 			return fmt.Errorf("unexpected trustee %s", sid)
 		}
 	}
-	if !seenUser || !seenSystem {
+	if !seenAccess || !seenSystem {
 		return fmt.Errorf("missing current-user or SYSTEM ACE")
 	}
 	return nil

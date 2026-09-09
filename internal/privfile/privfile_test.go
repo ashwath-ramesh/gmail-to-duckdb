@@ -11,6 +11,32 @@ import (
 	"testing"
 )
 
+func TestWriteRelativePathFromWorkingDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := Write("secret.json", []byte(`{"v":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivate(t, filepath.Join(dir, "secret.json"))
+	got, err := os.ReadFile("secret.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"v":1}` {
+		t.Fatalf("%s", got)
+	}
+	if err := Write("secret.json", []byte(`{"v":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(filepath.Join(dir, "secret.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"v":2}` {
+		t.Fatalf("%s", got)
+	}
+}
+
 func TestWriteReplacesPermissiveFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secret.json")
 	if err := os.WriteFile(path, []byte(`{"v":"old"}`), 0o644); err != nil {
@@ -82,6 +108,26 @@ func TestReadRejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestReadAcceptsInheritedPrivateChild(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "app")
+	if err := MkdirPrivate(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "secret.json")
+	want := []byte(`{"v":1}`)
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("%s", got)
+	}
+	assertPrivate(t, path)
+}
+
 func TestReadTightensPermissiveFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secret.json")
 	want := []byte(`{"v":1}`)
@@ -118,7 +164,9 @@ func TestCheckDoesNotModifyPermissiveFile(t *testing.T) {
 func TestFailedWriteLeavesPriorAndCleansTemp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "secret.json")
-	old := []byte(`{"v":"old","pad":"` + strings.Repeat("A", 32) + `"}`)
+	priorCanary := "CANARY_PRIOR_PAYLOAD_7f3a"
+	nextCanary := "CANARY_REPLACEMENT_PAYLOAD_9c1d"
+	old := []byte(`{"v":"` + priorCanary + `","pad":"` + strings.Repeat("A", 32) + `"}`)
 	if err := Write(path, old); err != nil {
 		t.Fatal(err)
 	}
@@ -126,11 +174,11 @@ func TestFailedWriteLeavesPriorAndCleansTemp(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = restoreDirCreatable(dir) })
-	err := Write(path, []byte(`{"v":"new"}`))
+	err := Write(path, []byte(`{"v":"`+nextCanary+`"}`))
 	if err == nil {
 		t.Fatal("expected replace failure")
 	}
-	if strings.Contains(err.Error(), "old") || strings.Contains(err.Error(), "new") {
+	if strings.Contains(err.Error(), priorCanary) || strings.Contains(err.Error(), nextCanary) {
 		t.Fatalf("error leaked payload: %v", err)
 	}
 	if err := restoreDirCreatable(dir); err != nil {
@@ -186,6 +234,88 @@ func TestAtomicReadersSeeWholeJSON(t *testing.T) {
 		t.Fatal(err)
 	default:
 	}
+}
+
+func TestCheckDirRejectsPermissive(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := makeDirPermissive(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDir(dir); err == nil {
+		t.Fatal("expected permissive reject")
+	}
+}
+
+func TestHardenDirMakesPrivate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := makeDirPermissive(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := HardenDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	assertNewAppDirPrivate(t, dir)
+}
+
+func TestHardenDirRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	path := filepath.Join(root, "link")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		skipIfNoSymlink(t, err)
+	}
+	if err := HardenDir(path); err == nil {
+		t.Fatal("expected symlink reject")
+	}
+	if err := CheckDir(path); err == nil {
+		t.Fatal("expected symlink reject")
+	}
+	assertNewAppDirPrivate(t, target)
+}
+
+func TestHardenDirDoesNotChmodParent(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := makeDirPermissive(parent); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotParent(t, parent)
+	child := filepath.Join(parent, "app")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := makeDirPermissive(child); err != nil {
+		t.Fatal(err)
+	}
+	if err := HardenDir(child); err != nil {
+		t.Fatal(err)
+	}
+	assertParentUnchanged(t, parent, before)
+	assertNewAppDirPrivate(t, child)
 }
 
 func TestMkdirPrivateDoesNotChmodParent(t *testing.T) {

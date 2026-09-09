@@ -148,8 +148,7 @@ type DB struct {
 }
 
 type Options struct {
-	DuckUI  bool
-	TempDir string
+	DuckUI bool
 }
 
 func Open(path string) (*DB, error) {
@@ -161,11 +160,19 @@ func OpenWith(path string, opt Options) (*DB, error) {
 }
 
 func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
+	path, spill, err := prepareOpen(path)
+	if err != nil {
+		return nil, err
+	}
 	sqldb, err := sql.Open("duckdb", path)
 	if err != nil {
 		return nil, err
 	}
 	sqldb.SetMaxOpenConns(1)
+	if err := applyTempSettings(sqldb, spill); err != nil {
+		_ = sqldb.Close()
+		return nil, err
+	}
 	if _, err := sqldb.Exec(schema); err != nil {
 		_ = sqldb.Close()
 		return nil, fmt.Errorf("schema: %w", err)
@@ -188,11 +195,23 @@ func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := db.lockSQL(opt); err != nil {
+	if err := db.lockSQL(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
+}
+
+func applyTempSettings(db *sql.DB, spill string) error {
+	return execSet(db, "temp_directory", spill)
+}
+
+func execSet(db *sql.DB, name, value string) error {
+	q := "SET " + name + " = '" + strings.ReplaceAll(value, "'", "''") + "'"
+	if _, err := db.Exec(q); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	return nil
 }
 
 func bootstrapTrusted(ex execer, opt Options) error {
@@ -217,13 +236,7 @@ func loadExtension(ex execer, name string) error {
 	return err
 }
 
-func (d *DB) lockSQL(opt Options) error {
-	if opt.TempDir != "" {
-		q := "SET temp_directory = '" + strings.ReplaceAll(opt.TempDir, "'", "''") + "'"
-		if _, err := d.sql.Exec(q); err != nil {
-			return fmt.Errorf("temp_directory: %w", err)
-		}
-	}
+func (d *DB) lockSQL() error {
 	if _, err := d.sql.Exec("SET enable_external_access = false"); err != nil {
 		return fmt.Errorf("enable_external_access: %w", err)
 	}

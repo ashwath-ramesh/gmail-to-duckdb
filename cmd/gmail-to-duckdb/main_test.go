@@ -4,18 +4,30 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 )
 
 func seedDB(t *testing.T) string {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "mail.duckdb")
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		dir = filepath.Join(dir, "db")
+		if err := privfile.MkdirPrivate(dir); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "mail.duckdb")
 	db, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)

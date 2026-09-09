@@ -47,7 +47,13 @@ func Init(credSrc, dbPath string) (config.Config, error) {
 	if err := privfile.MkdirPrivate(config.Dir()); err != nil {
 		return config.Config{}, err
 	}
+	if err := privfile.HardenDir(config.Dir()); err != nil {
+		return config.Config{}, err
+	}
 	if err := privfile.MkdirPrivate(config.DataDir()); err != nil {
+		return config.Config{}, err
+	}
+	if err := privfile.HardenDir(config.DataDir()); err != nil {
 		return config.Config{}, err
 	}
 	dest := filepath.Join(config.Dir(), "credentials.json")
@@ -94,6 +100,9 @@ func Doctor(ctx context.Context, cfg config.Config) query.Envelope {
 			env.Checks = append(env.Checks, query.Check{Name: "database", OK: false, Detail: "serve is marked running but not reachable: " + err.Error()})
 			env.Checks = append(env.Checks, query.Check{Name: "fts", OK: false, Detail: "database owned by unreachable serve"})
 		}
+	} else if !os.IsNotExist(err) {
+		env.Checks = append(env.Checks, query.Check{Name: "database", OK: false, Detail: "serve file present but unreadable: " + err.Error()})
+		env.Checks = append(env.Checks, query.Check{Name: "fts", OK: false, Detail: "serve file unreadable"})
 	} else {
 		dbCheck, db := checkDB(cfg.DB)
 		env.Checks = append(env.Checks, dbCheck)
@@ -266,8 +275,12 @@ func serveUsesPort(info web.ServeInfo, port int) bool {
 func checkServe(dbPath string) query.Check {
 	c := query.Check{Name: "serve"}
 	if _, err := web.ReadServeFile(dbPath); err != nil {
-		c.OK = true
-		c.Detail = "serve not running"
+		if os.IsNotExist(err) {
+			c.OK = true
+			c.Detail = "serve not running"
+			return c
+		}
+		c.Detail = "serve file present but unreadable: " + err.Error()
 		return c
 	}
 	if _, err := web.Dial(dbPath); err != nil {
