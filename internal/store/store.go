@@ -147,7 +147,20 @@ type DB struct {
 	ftsOK bool
 }
 
+type Options struct {
+	DuckUI  bool
+	TempDir string
+}
+
 func Open(path string) (*DB, error) {
+	return OpenWith(path, Options{})
+}
+
+func OpenWith(path string, opt Options) (*DB, error) {
+	return openWith(path, opt, nil)
+}
+
+func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
 	sqldb, err := sql.Open("duckdb", path)
 	if err != nil {
 		return nil, err
@@ -167,7 +180,57 @@ func Open(path string) (*DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	var ex execer = sqldb
+	if wrap != nil {
+		ex = wrap(sqldb)
+	}
+	if err := bootstrapTrusted(ex, opt); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := db.lockSQL(opt); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return db, nil
+}
+
+func bootstrapTrusted(ex execer, opt Options) error {
+	_ = loadExtension(ex, "fts")
+	if opt.DuckUI {
+		if err := loadExtension(ex, "ui"); err != nil {
+			return fmt.Errorf("duckdb ui: %w", err)
+		}
+	}
+	return nil
+}
+
+func loadExtension(ex execer, name string) error {
+	ctx := context.Background()
+	if _, err := ex.ExecContext(ctx, "LOAD "+name); err == nil {
+		return nil
+	}
+	if _, err := ex.ExecContext(ctx, "INSTALL "+name); err != nil {
+		return err
+	}
+	_, err := ex.ExecContext(ctx, "LOAD "+name)
+	return err
+}
+
+func (d *DB) lockSQL(opt Options) error {
+	if opt.TempDir != "" {
+		q := "SET temp_directory = '" + strings.ReplaceAll(opt.TempDir, "'", "''") + "'"
+		if _, err := d.sql.Exec(q); err != nil {
+			return fmt.Errorf("temp_directory: %w", err)
+		}
+	}
+	if _, err := d.sql.Exec("SET enable_external_access = false"); err != nil {
+		return fmt.Errorf("enable_external_access: %w", err)
+	}
+	if _, err := d.sql.Exec("SET lock_configuration = true"); err != nil {
+		return fmt.Errorf("lock_configuration: %w", err)
+	}
+	return nil
 }
 
 func (d *DB) ensureSchemaVersion(ctx context.Context) error {
@@ -634,15 +697,11 @@ func (d *DB) ClearState(ctx context.Context, key string) error {
 }
 
 func (d *DB) RebuildFTS(ctx context.Context) error {
-	_, err := d.sql.ExecContext(ctx, "INSTALL fts; LOAD fts;")
-	if err != nil {
-		return fmt.Errorf("load fts: %w", err)
-	}
-	_, err = d.sql.ExecContext(ctx, `
+	_, err := d.sql.ExecContext(ctx, `
 PRAGMA create_fts_index('messages', 'id', 'search_text', overwrite=1)
 `)
 	if err != nil {
-		return err
+		return fmt.Errorf("fts: %w", err)
 	}
 	if err := d.SetState(ctx, stateFTSIndex, ftsIndexVer); err != nil {
 		return err

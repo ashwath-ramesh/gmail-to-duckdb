@@ -20,7 +20,7 @@ Commands:
   search QUERY [--json]       Search messages
   get MESSAGE_ID [--body]     Fetch one message
   schema [--json]             Database schema
-  sql [--write] [--json]      Run SQL (read-only by default)
+  sql [--write] [--json]      Run SQL (read-only; --write is database-only)
 
 Flags (most commands):
   --db PATH            DuckDB file (default mail.duckdb)

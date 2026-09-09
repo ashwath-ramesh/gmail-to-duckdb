@@ -38,7 +38,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	db, err := store.Open(*cf.db)
+	db, err := store.OpenWith(*cf.db, store.Options{DuckUI: *duckUI})
 	if err != nil {
 		return err
 	}

@@ -283,6 +283,26 @@ func TestStatusSchemaSQL(t *testing.T) {
 	}
 }
 
+func TestSQLExploitDoesNotDelete(t *testing.T) {
+	s, db := testServer(t)
+	body := strings.NewReader(`{"query":"SELECT 1 AS \"--\"; DELETE FROM messages"}`)
+	r := httptest.NewRequest(http.MethodPost, "/api/sql", body)
+	r.RemoteAddr = "127.0.0.1:1"
+	r.Header.Set("X-Token", "test")
+	rw := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rw, r)
+	if rw.Code == 200 {
+		t.Fatalf("expected exploit reject %d %s", rw.Code, rw.Body.String())
+	}
+	got, err := db.GetMessage(context.Background(), "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "m1" {
+		t.Fatalf("data lost: %+v", got)
+	}
+}
+
 func TestSyncNow(t *testing.T) {
 	s, _ := testServer(t)
 	called := false

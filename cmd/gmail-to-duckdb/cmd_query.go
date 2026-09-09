@@ -80,7 +80,7 @@ func cmdSchema(args []string, stdout io.Writer) error {
 func cmdSQL(args []string, stdin io.Reader, stdout io.Writer) error {
 	cf := globalFlags("sql")
 	asJSON := cf.fs.Bool("json", false, "JSON envelope")
-	write := cf.fs.Bool("write", false, "allow mutating SQL")
+	write := cf.fs.Bool("write", false, "allow database DML/DDL (no files, attachments, or settings)")
 	_ = cf.fs.Bool("read-only", false, "explicit read-only (default)")
 	format := cf.fs.String("format", "", "json or table")
 	if err := parseFlags(cf.fs, args); err != nil {

@@ -111,7 +111,9 @@ gmail-to-duckdb sql --json < query.sql
 
 `sync` stays available for one-shot jobs. If `serve` is running, `sync` and the query commands call its HTTP API. If a serve file exists but serve is down, those commands fail. They do not open the locked DuckDB file. If no serve file exists, they open DuckDB.
 
-`sql` is read-only by default. Pass `--write` for mutating statements, file reads, and `EXPLAIN ANALYZE` of writes. `--read-only` is an explicit no-op for agents. Read-only mode also turns off DuckDB external file access.
+`sql` is read-only by default. Pass `--write` for ordinary database DML and DDL only. `--write` does not allow transaction control, settings changes, extension install or load, `ATTACH`/`DETACH`, `COPY`, import/export, or external files. `--read-only` is an explicit no-op for agents. Both modes disable DuckDB external file access and lock that configuration.
+
+Dynamic `PIVOT table ON ...` is rejected. DuckDB expands that form into writes and multiple statements. Use `FROM table PIVOT (...)` for a supported read.
 
 Flags:
 

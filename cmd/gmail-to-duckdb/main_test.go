@@ -63,6 +63,21 @@ func TestSQLJSONAndReadOnly(t *testing.T) {
 	}
 }
 
+func TestSQLExploitDoesNotDelete(t *testing.T) {
+	dbPath := seedDB(t)
+	var out bytes.Buffer
+	if err := run([]string{"gmail-to-duckdb", "sql", "--db", dbPath, `SELECT 1 AS "--"; DELETE FROM messages`}, strings.NewReader(""), &out, &out); err == nil {
+		t.Fatal("expected exploit reject")
+	}
+	out.Reset()
+	if err := run([]string{"gmail-to-duckdb", "sql", "--db", dbPath, "SELECT id FROM messages"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "m1") {
+		t.Fatalf("data lost: %s", out.String())
+	}
+}
+
 func TestSQLStdin(t *testing.T) {
 	dbPath := seedDB(t)
 	var out bytes.Buffer
