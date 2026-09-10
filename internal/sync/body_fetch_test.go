@@ -424,6 +424,86 @@ func TestBodiesIncompleteThenTransportKeepsBoth(t *testing.T) {
 	}
 }
 
+func TestBodiesDoNotOverwriteNewerMetadata(t *testing.T) {
+	ctx := context.Background()
+	db, r, api := openTest(t)
+	if err := db.UpsertMessages(ctx, []store.Message{{
+		ID: "m", ThreadID: "t", InternalDate: time.Unix(1, 0).UTC(),
+		FromEmail: "a@x.com", Subject: "newer subject", LabelIDs: []string{"INBOX", "UNREAD"},
+		Headers: []store.Header{{Name: "Subject", Value: "newer subject"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetState(ctx, stateHistoryID, "9"); err != nil {
+		t.Fatal(err)
+	}
+	api.maxFull = 8
+	api.fullRaw = map[string][]byte{
+		"m": rawMsg("m", "a@x.com", "stale subject", false, "body-only"),
+	}
+	if err := r.Sync(ctx, Options{Bodies: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetMessage(ctx, "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Subject != "newer subject" || got.Body != "body-only" || !got.BodyFetched {
+		t.Fatalf("stale metadata written: %+v", got)
+	}
+	if len(got.Headers) != 1 || got.Headers[0].Value != "newer subject" {
+		t.Fatalf("headers overwritten %#v", got.Headers)
+	}
+}
+
+func TestFetchOnDemand404TombsAndNoFabricate(t *testing.T) {
+	ctx := context.Background()
+	db, _, api := openTest(t)
+	if err := db.UpsertMessages(ctx, []store.Message{{
+		ID: "gone", ThreadID: "t", InternalDate: time.Unix(1, 0).UTC(), FromEmail: "a@x.com", Subject: "G",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	api.notFound = map[string]bool{"gone": true, "missing": true}
+	if err := FetchOnDemand(ctx, db, api, "gone"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err %v", err)
+	}
+	got, err := db.GetMessage(ctx, "gone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsDeleted || got.BodyFetched {
+		t.Fatalf("404 tombstone %+v", got)
+	}
+	if err := FetchOnDemand(ctx, db, api, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing %v", err)
+	}
+	if _, err := db.GetMessage(ctx, "missing"); err == nil {
+		t.Fatal("must not fabricate")
+	}
+}
+
+func TestFetchOnDemandIDMismatchNoWrite(t *testing.T) {
+	ctx := context.Background()
+	db, _, api := openTest(t)
+	if err := db.UpsertMessages(ctx, []store.Message{{
+		ID: "m", ThreadID: "t", InternalDate: time.Unix(1, 0).UTC(), FromEmail: "a@x.com", Subject: "S",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	api.fullRaw = map[string][]byte{"m": rawMsg("other", "a@x.com", "S", false, "nope")}
+	if err := FetchOnDemand(ctx, db, api, "m"); err == nil {
+		t.Fatal("mismatch must fail")
+	}
+	got, err := db.GetMessage(ctx, "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BodyFetched || got.Body != "" {
+		t.Fatalf("mismatch wrote %+v", got)
+	}
+}
+
 func rawAttachmentOnly(id, from, subject string) []byte {
 	b, err := json.Marshal(map[string]any{
 		"id":           id,

@@ -25,6 +25,15 @@ func (d *DB) QuerySQL(ctx context.Context, query string, allowWrite bool) (SQLRe
 	if err := rejectSQLText(query); err != nil {
 		return SQLResult{}, err
 	}
+	if allowWrite {
+		if err := d.acquire(ctx); err != nil {
+			return SQLResult{}, err
+		}
+		defer d.release()
+		if err := markFTSDirty(ctx, d.sql); err != nil {
+			return SQLResult{}, err
+		}
+	}
 	c, err := d.sql.Conn(ctx)
 	if err != nil {
 		return SQLResult{}, err

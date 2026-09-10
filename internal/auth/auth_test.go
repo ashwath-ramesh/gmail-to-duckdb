@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,77 @@ func TestSaveTokenReplacesPermissiveFile(t *testing.T) {
 	}
 	if strings.Contains(string(b), `"old"`) || !strings.Contains(string(b), `"new"`) {
 		t.Fatalf("content %s", b)
+	}
+}
+
+func TestPersistSourceWrapsInvalidGrant(t *testing.T) {
+	secret := "refresh-secret-value"
+	body := []byte(`{"error":"invalid_grant","error_description":"Token has been expired or revoked.","access_token":"` + secret + `"}`)
+	src := &persistSource{
+		src: errTokenSource{err: &oauth2.RetrieveError{
+			ErrorCode:        "invalid_grant",
+			ErrorDescription: "Token has been expired or revoked.",
+			Body:             body,
+		}},
+		path: filepath.Join(t.TempDir(), "mail.token.json"),
+	}
+	tok, err := src.Token()
+	if err == nil {
+		t.Fatal("expected invalid_grant wrap")
+	}
+	if tok != nil {
+		t.Fatal("token on refresh error")
+	}
+	if !errors.Is(err, errInvalidGrant) {
+		t.Fatalf("want errInvalidGrant, got %v", err)
+	}
+	if errors.Is(err, errNeedLogin) {
+		t.Fatal("must not start login")
+	}
+	msg := err.Error()
+	for _, need := range []string{"stop serve", "token file", "same account", "do not delete the database"} {
+		if !strings.Contains(strings.ToLower(msg), need) {
+			t.Fatalf("missing %q in %q", need, msg)
+		}
+	}
+	for _, leak := range []string{secret, "access_token", string(body), "Token has been expired or revoked.", "Response:"} {
+		if strings.Contains(msg, leak) {
+			t.Fatalf("leaked %q in %q", leak, msg)
+		}
+	}
+}
+
+func TestPersistSourceWrapsInvalidGrantFromBody(t *testing.T) {
+	body := []byte(`{"error":"invalid_grant","refresh_token":"hidden-refresh"}`)
+	src := &persistSource{
+		src: errTokenSource{err: &oauth2.RetrieveError{
+			Response: &http.Response{Status: "400 Bad Request"},
+			Body:     body,
+		}},
+		path: filepath.Join(t.TempDir(), "mail.token.json"),
+	}
+	_, err := src.Token()
+	if !errors.Is(err, errInvalidGrant) {
+		t.Fatalf("want wrap from body, got %v", err)
+	}
+	if strings.Contains(err.Error(), "hidden-refresh") || strings.Contains(err.Error(), string(body)) {
+		t.Fatalf("leaked body: %v", err)
+	}
+}
+
+func TestPersistSourceLeavesOtherRefreshErrors(t *testing.T) {
+	body := []byte(`{"error":"invalid_client","error_description":"keep"}`)
+	orig := &oauth2.RetrieveError{ErrorCode: "invalid_client", Body: body}
+	src := &persistSource{
+		src:  errTokenSource{err: orig},
+		path: filepath.Join(t.TempDir(), "mail.token.json"),
+	}
+	_, err := src.Token()
+	if errors.Is(err, errInvalidGrant) {
+		t.Fatal("wrapped non-grant")
+	}
+	if !errors.Is(err, orig) {
+		t.Fatalf("lost original: %v", err)
 	}
 }
 
@@ -279,6 +351,14 @@ type stubTokenSource struct {
 
 func (s stubTokenSource) Token() (*oauth2.Token, error) {
 	return s.tok, nil
+}
+
+type errTokenSource struct {
+	err error
+}
+
+func (s errTokenSource) Token() (*oauth2.Token, error) {
+	return nil, s.err
 }
 
 const desktopCreds = `{"installed":{"client_id":"x.apps.googleusercontent.com","client_secret":"s","redirect_uris":["http://localhost"],"auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token"}}`

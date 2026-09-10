@@ -2,11 +2,8 @@ package gmail
 
 import (
 	"encoding/json"
-	"errors"
 	"strconv"
 )
-
-var ErrHistoryGone = errors.New("gmail history id expired")
 
 type HistoryPage struct {
 	Added         []string

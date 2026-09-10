@@ -4,17 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	"golang.org/x/time/rate"
 	gmailapi "google.golang.org/api/gmail/v1"
-	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -29,14 +25,16 @@ type API interface {
 	Labels(ctx context.Context) ([]store.Label, error)
 	ListMessages(ctx context.Context, pageToken string) (ids []string, next string, err error)
 	History(ctx context.Context, startID uint64, pageToken string) (HistoryPage, error)
-	BatchGet(ctx context.Context, ids []string, format string) ([][]byte, error)
-	Get(ctx context.Context, id, format string) ([]byte, error)
+	BatchGet(ctx context.Context, ids []string, format string) ([]FetchResult, error)
+	Get(ctx context.Context, id, format string) (FetchResult, error)
 }
 
 type Client struct {
-	svc     *gmailapi.Service
-	http    *http.Client
-	limiter *rate.Limiter
+	svc      *gmailapi.Service
+	http     *http.Client
+	limiter  *rate.Limiter
+	batchURL string
+	waitHook func(context.Context, int) error
 }
 
 func New(ctx context.Context, hc *http.Client) (*Client, error) {
@@ -44,22 +42,40 @@ func New(ctx context.Context, hc *http.Client) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newClient(svc, hc), nil
+}
+
+func newClient(svc *gmailapi.Service, hc *http.Client) *Client {
 	return &Client{
-		svc:     svc,
-		http:    hc,
-		limiter: rate.NewLimiter(rate.Limit(quotaPerSec), quotaBurst),
-	}, nil
+		svc:      svc,
+		http:     hc,
+		limiter:  rate.NewLimiter(rate.Limit(quotaPerSec), quotaBurst),
+		batchURL: defaultBatchURL,
+	}
+}
+
+func (c *Client) waitQuota(ctx context.Context, n int) error {
+	if n <= 0 {
+		n = 1
+	}
+	if c.waitHook != nil {
+		return c.waitHook(ctx, n)
+	}
+	return c.limiter.WaitN(ctx, n)
 }
 
 func (c *Client) Profile(ctx context.Context) (Profile, error) {
 	var p *gmailapi.Profile
 	err := retry(ctx, func() error {
+		if err := c.waitQuota(ctx, 1); err != nil {
+			return err
+		}
 		var e error
 		p, e = c.svc.Users.GetProfile("me").Context(ctx).Do()
 		return e
 	})
 	if err != nil {
-		return Profile{}, err
+		return Profile{}, mapAPIError(err)
 	}
 	return Profile{Email: p.EmailAddress, HistoryID: p.HistoryId}, nil
 }
@@ -67,12 +83,15 @@ func (c *Client) Profile(ctx context.Context) (Profile, error) {
 func (c *Client) Labels(ctx context.Context) ([]store.Label, error) {
 	var r *gmailapi.ListLabelsResponse
 	err := retry(ctx, func() error {
+		if err := c.waitQuota(ctx, 1); err != nil {
+			return err
+		}
 		var e error
 		r, e = c.svc.Users.Labels.List("me").Context(ctx).Do()
 		return e
 	})
 	if err != nil {
-		return nil, err
+		return nil, mapAPIError(err)
 	}
 	out := make([]store.Label, 0, len(r.Labels))
 	for _, l := range r.Labels {
@@ -82,12 +101,12 @@ func (c *Client) Labels(ctx context.Context) ([]store.Label, error) {
 }
 
 func (c *Client) ListMessages(ctx context.Context, pageToken string) ([]string, string, error) {
-	if err := c.limiter.WaitN(ctx, quotaPerList); err != nil {
-		return nil, "", err
-	}
 	var r *gmailapi.ListMessagesResponse
 	err := retry(ctx, func() error {
-		call := c.svc.Users.Messages.List("me").MaxResults(500).Context(ctx)
+		if err := c.waitQuota(ctx, quotaPerList); err != nil {
+			return err
+		}
+		call := c.svc.Users.Messages.List("me").MaxResults(500).IncludeSpamTrash(true).Context(ctx)
 		if pageToken != "" {
 			call = call.PageToken(pageToken)
 		}
@@ -96,7 +115,7 @@ func (c *Client) ListMessages(ctx context.Context, pageToken string) ([]string, 
 		return e
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, "", mapListError(err)
 	}
 	ids := make([]string, 0, len(r.Messages))
 	for _, m := range r.Messages {
@@ -106,11 +125,11 @@ func (c *Client) ListMessages(ctx context.Context, pageToken string) ([]string, 
 }
 
 func (c *Client) History(ctx context.Context, startID uint64, pageToken string) (HistoryPage, error) {
-	if err := c.limiter.WaitN(ctx, quotaPerHist); err != nil {
-		return HistoryPage{}, err
-	}
 	var r *gmailapi.ListHistoryResponse
 	err := retry(ctx, func() error {
+		if err := c.waitQuota(ctx, quotaPerHist); err != nil {
+			return err
+		}
 		call := c.svc.Users.History.List("me").StartHistoryId(startID).Context(ctx)
 		if pageToken != "" {
 			call = call.PageToken(pageToken)
@@ -120,10 +139,10 @@ func (c *Client) History(ctx context.Context, startID uint64, pageToken string) 
 		return e
 	})
 	if err != nil {
-		if isHTTPStatus(err, 404) {
+		if classifyError(err) == classNotFound {
 			return HistoryPage{}, ErrHistoryGone
 		}
-		return HistoryPage{}, err
+		return HistoryPage{}, mapListError(err)
 	}
 	raw, err := r.MarshalJSON()
 	if err != nil {
@@ -132,42 +151,38 @@ func (c *Client) History(ctx context.Context, startID uint64, pageToken string) 
 	return parseHistory(raw)
 }
 
-func (c *Client) BatchGet(ctx context.Context, ids []string, format string) ([][]byte, error) {
+func (c *Client) BatchGet(ctx context.Context, ids []string, format string) ([]FetchResult, error) {
 	if format == "" {
 		format = "metadata"
 	}
-	var all [][]byte
+	var all []FetchResult
 	chunks := splitIDs(ids, maxBatchSize)
 	for i, chunk := range chunks {
 		if i > 0 {
-			timer := time.NewTimer(300 * time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil, ctx.Err()
-			case <-timer.C:
+			if err := retries.sleep(ctx, batchGap); err != nil {
+				return all, err
 			}
 		}
 		parts, err := c.batchGetOnce(ctx, chunk, format)
-		if err != nil {
-			return nil, err
-		}
 		all = append(all, parts...)
+		if err != nil {
+			return all, err
+		}
 	}
 	return all, nil
 }
 
-func (c *Client) batchGetOnce(ctx context.Context, ids []string, format string) ([][]byte, error) {
-	if err := c.limiter.WaitN(ctx, quotaPerGet*len(ids)); err != nil {
-		return nil, err
-	}
+func (c *Client) batchGetOnce(ctx context.Context, ids []string, format string) ([]FetchResult, error) {
 	body, ct, err := encodeBatchGet(ids, format)
 	if err != nil {
 		return nil, err
 	}
-	var out [][]byte
+	var last []FetchResult
 	err = retry(ctx, func() error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, batchURL, bytes.NewReader(body))
+		if err := c.waitQuota(ctx, quotaPerGet*len(ids)); err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.batchURL, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
@@ -181,92 +196,99 @@ func (c *Client) batchGetOnce(ctx context.Context, ids []string, format string) 
 		if err != nil {
 			return err
 		}
-		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-			return fmt.Errorf("batch status %d: %s", resp.StatusCode, bytes.TrimSpace(raw))
-		}
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("batch status %d: %s", resp.StatusCode, bytes.TrimSpace(raw))
+			return statusErr(resp.StatusCode, string(raw), resp.Header)
 		}
-		parts, err := decodeBatchBody(raw, resp.Header.Get("Content-Type"))
+		parts, err := decodeBatchBody(raw, resp.Header.Get("Content-Type"), ids)
 		if err != nil {
 			return err
 		}
-		out = parts
+		last = parts
+		if err := retryablePartError(parts); err != nil {
+			return err
+		}
 		return nil
 	})
-	return out, err
+	if last == nil && err != nil {
+		last = unresolvedChunk(ids, err)
+	}
+	if err != nil {
+		return last, mapAPIError(err)
+	}
+	return last, nil
 }
 
-func (c *Client) Get(ctx context.Context, id, format string) ([]byte, error) {
+func (c *Client) Get(ctx context.Context, id, format string) (FetchResult, error) {
 	if format == "" {
 		format = "full"
 	}
-	if err := c.limiter.WaitN(ctx, quotaPerGet); err != nil {
-		return nil, err
-	}
 	var msg *gmailapi.Message
 	err := retry(ctx, func() error {
-		call := c.svc.Users.Messages.Get("me", id).Format(format).Context(ctx)
-		if format == "metadata" {
-			call = call.MetadataHeaders(metadataHeaders...)
+		if err := c.waitQuota(ctx, quotaPerGet); err != nil {
+			return err
 		}
+		call := c.svc.Users.Messages.Get("me", id).Format(format).Context(ctx)
 		var e error
 		msg, e = call.Do()
 		return e
 	})
 	if err != nil {
-		return nil, err
+		switch classifyError(err) {
+		case classNotFound:
+			return FetchResult{ID: id, Status: FetchNotFound}, nil
+		case classAuth:
+			return FetchResult{ID: id, Status: FetchFatal, Err: err}, mapAPIError(err)
+		case classRetryable:
+			return FetchResult{ID: id, Status: FetchRetryable, Err: err}, nil
+		default:
+			return FetchResult{ID: id, Status: FetchFatal, Err: err}, err
+		}
 	}
-	return json.Marshal(msg)
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		return FetchResult{ID: id, Status: FetchFatal, Err: err}, err
+	}
+	if err := MatchMessageID(raw, id); err != nil {
+		return FetchResult{ID: id, Status: FetchFatal, Err: err}, nil
+	}
+	return FetchResult{ID: id, Status: FetchOK, Raw: raw}, nil
 }
 
-func retry(ctx context.Context, fn func() error) error {
-	var err error
-	backoff := 2 * time.Second
-	for attempt := 0; attempt < 8; attempt++ {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		err = fn()
-		if err == nil {
-			return nil
-		}
-		if !retryable(err) {
-			return err
-		}
-		timer := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-		backoff *= 2
-		if backoff > 30*time.Second {
-			backoff = 30 * time.Second
-		}
+func mapListError(err error) error {
+	switch classifyError(err) {
+	case classPageToken:
+		return ErrPageTokenExpired
+	case classAuth:
+		return mapAPIError(err)
+	default:
+		return err
 	}
-	return err
 }
 
-func retryable(err error) bool {
-	if err == nil {
-		return false
+func retryablePartError(parts []FetchResult) error {
+	var best error
+	var wait time.Duration
+	for _, p := range parts {
+		if p.Status != FetchRetryable || p.Err == nil {
+			continue
+		}
+		w := retryAfterOf(p.Err)
+		if best == nil || w > wait {
+			best = p.Err
+			wait = w
+		}
 	}
-	if isHTTPStatus(err, 429) || isHTTPStatus(err, 500) || isHTTPStatus(err, 502) || isHTTPStatus(err, 503) {
-		return true
-	}
-	s := err.Error()
-	return strings.Contains(s, "429") ||
-		strings.Contains(s, "rateLimitExceeded") ||
-		strings.Contains(s, "RESOURCE_EXHAUSTED") ||
-		strings.Contains(s, "batch status 5")
+	return best
 }
 
-func isHTTPStatus(err error, code int) bool {
-	var gerr *googleapi.Error
-	if errors.As(err, &gerr) {
-		return gerr.Code == code
+func unresolvedChunk(ids []string, err error) []FetchResult {
+	out := make([]FetchResult, 0, len(ids))
+	st := FetchRetryable
+	if !isRetryable(err) {
+		st = FetchFatal
 	}
-	return false
+	for _, id := range ids {
+		out = append(out, FetchResult{ID: id, Status: st, Err: err})
+	}
+	return out
 }

@@ -5,74 +5,23 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/search"
 	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 const (
-	SchemaVersion      = 2
-	StateSchemaVersion = "schema_version"
-	StateLastSyncOK    = "last_sync_ok"
-	StateLastSyncError = "last_sync_error"
-
-	stateSearchText = "search_text_v1"
-	stateFTSIndex   = "fts_index"
-	ftsIndexVer     = "search_text"
-	maxLimit        = 100
-	maxOffset       = 5000
-	maxQueryRunes   = 200
-	likeEscape      = " ESCAPE '\\'"
+	maxLimit   = 100
+	maxOffset  = 5000
+	likeEscape = " ESCAPE '\\'"
+	listSQL    = "CAST(? AS JSON)::VARCHAR[]"
 )
 
 type execer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
-
-const schema = `
-CREATE TABLE IF NOT EXISTS messages (
-  id VARCHAR PRIMARY KEY,
-  thread_id VARCHAR NOT NULL,
-  history_id UBIGINT,
-  internal_date TIMESTAMP NOT NULL,
-  from_name VARCHAR,
-  from_email VARCHAR,
-  to_emails VARCHAR[],
-  cc_emails VARCHAR[],
-  subject VARCHAR,
-  snippet VARCHAR,
-  body VARCHAR,
-  size_bytes INTEGER,
-  label_ids VARCHAR[],
-  is_read BOOLEAN,
-  is_outgoing BOOLEAN,
-  is_deleted BOOLEAN DEFAULT false,
-  has_body BOOLEAN DEFAULT false,
-  body_fetched BOOLEAN DEFAULT false,
-  synced_at TIMESTAMP,
-  search_text VARCHAR
-);
-CREATE INDEX IF NOT EXISTS messages_internal_date ON messages(internal_date);
-CREATE INDEX IF NOT EXISTS messages_from_email ON messages(from_email);
-CREATE INDEX IF NOT EXISTS messages_thread_id ON messages(thread_id);
-CREATE INDEX IF NOT EXISTS messages_is_deleted ON messages(is_deleted);
-CREATE TABLE IF NOT EXISTS labels (
-  id VARCHAR PRIMARY KEY,
-  name VARCHAR,
-  type VARCHAR
-);
-CREATE TABLE IF NOT EXISTS sync_state (
-  key VARCHAR PRIMARY KEY,
-  value VARCHAR
-);
-CREATE TABLE IF NOT EXISTS sync_seen (
-  id VARCHAR PRIMARY KEY
-);
-`
 
 const searchTextSQL = `trim(concat_ws(' ', from_name, from_email, array_to_string(to_emails, ' '), array_to_string(cc_emails, ' '), subject, snippet, body))`
 
@@ -103,6 +52,12 @@ type Message struct {
 	HasBody      bool
 	BodyFetched  bool
 	SyncedAt     time.Time
+	Headers      []Header `json:"-"`
+}
+
+type Header struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type Label struct {
@@ -147,6 +102,20 @@ func (c Coverage) SearchCovers() string {
 
 type DB struct {
 	sql *sql.DB
+	mu  chan struct{}
+}
+
+func (d *DB) acquire(ctx context.Context) error {
+	select {
+	case d.mu <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (d *DB) release() {
+	<-d.mu
 }
 
 type Options struct {
@@ -175,7 +144,7 @@ func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
 		_ = sqldb.Close()
 		return nil, err
 	}
-	db := &DB{sql: sqldb}
+	db := &DB{sql: sqldb, mu: make(chan struct{}, 1)}
 	ctx := context.Background()
 	if err := db.rejectUnsupportedSchema(ctx); err != nil {
 		_ = db.Close()
@@ -192,6 +161,10 @@ func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
 	if err := db.migrateSchema(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if _, err := sqldb.Exec(schemaIndexes); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("schema indexes: %w", err)
 	}
 	var ex execer = sqldb
 	if wrap != nil {
@@ -252,98 +225,6 @@ func (d *DB) lockSQL() error {
 	return nil
 }
 
-func unsupportedSchema(ver int) error {
-	if ver < 0 || ver > SchemaVersion {
-		return fmt.Errorf("unsupported schema_version %d", ver)
-	}
-	return nil
-}
-
-func (d *DB) rejectUnsupportedSchema(ctx context.Context) error {
-	ver, err := d.schemaVersion(ctx)
-	if err != nil {
-		return err
-	}
-	return unsupportedSchema(ver)
-}
-
-func (d *DB) migrateSchema(ctx context.Context) error {
-	ver, err := d.schemaVersion(ctx)
-	if err != nil {
-		return err
-	}
-	if err := unsupportedSchema(ver); err != nil {
-		return err
-	}
-	if ver == SchemaVersion {
-		return nil
-	}
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if ver < 2 {
-		if _, err := tx.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS body_fetched BOOLEAN DEFAULT false`); err != nil {
-			return fmt.Errorf("body_fetched: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE messages SET body_fetched = true WHERE has_body`); err != nil {
-			return fmt.Errorf("body_fetched backfill: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE messages SET has_body = (body IS NOT NULL AND body <> '')`); err != nil {
-			return fmt.Errorf("has_body normalize: %w", err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO sync_state(key, value) VALUES (?, ?)
-ON CONFLICT (key) DO UPDATE SET value = excluded.value
-`, StateSchemaVersion, strconv.Itoa(SchemaVersion)); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (d *DB) schemaVersion(ctx context.Context) (int, error) {
-	var n int
-	err := d.sql.QueryRowContext(ctx, `
-SELECT count(*) FROM information_schema.tables
-WHERE table_schema = 'main' AND table_name = 'sync_state'
-`).Scan(&n)
-	if err != nil {
-		return 0, err
-	}
-	if n == 0 {
-		return 0, nil
-	}
-	v, ok, err := d.GetState(ctx, StateSchemaVersion)
-	if err != nil {
-		return 0, err
-	}
-	if !ok {
-		return 0, nil
-	}
-	ver, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("schema_version: %w", err)
-	}
-	return ver, nil
-}
-
-func (d *DB) migrateSearch(ctx context.Context) error {
-	if _, err := d.sql.Exec(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS search_text VARCHAR`); err != nil {
-		return fmt.Errorf("search_text: %w", err)
-	}
-	if _, ok, err := d.GetState(ctx, stateSearchText); err != nil {
-		return err
-	} else if ok {
-		return nil
-	}
-	if _, err := d.sql.Exec(`UPDATE messages SET search_text = ` + searchTextSQL + ` WHERE search_text IS NULL OR search_text = ''`); err != nil {
-		return fmt.Errorf("search_text backfill: %w", err)
-	}
-	return d.SetState(ctx, stateSearchText, "1")
-}
-
 func (d *DB) Close() error {
 	return d.sql.Close()
 }
@@ -352,27 +233,17 @@ func (d *DB) SQL() *sql.DB {
 	return d.sql
 }
 
-func (d *DB) UpsertMessages(ctx context.Context, msgs []Message) error {
-	if len(msgs) == 0 {
-		return nil
-	}
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	const q = `
+const upsertMessageSQL = `
 INSERT INTO messages (
   id, thread_id, history_id, internal_date,
   from_name, from_email, to_emails, cc_emails,
   subject, snippet, body, size_bytes, label_ids,
-  is_read, is_outgoing, is_deleted, has_body, body_fetched, synced_at
+  is_read, is_outgoing, is_deleted, has_body, body_fetched, synced_at, headers
 ) VALUES (
   ?, ?, ?, ?,
-  ?, ?, CAST(? AS VARCHAR[]), CAST(? AS VARCHAR[]),
-  ?, ?, ?, ?, CAST(? AS VARCHAR[]),
-  ?, ?, ?, ?, ?, ?
+  ?, ?, ` + listSQL + `, ` + listSQL + `,
+  ?, ?, ?, ?, ` + listSQL + `,
+  ?, ?, ?, ?, ?, ?, CAST(? AS JSON)
 )
 ON CONFLICT (id) DO UPDATE SET
   thread_id = excluded.thread_id,
@@ -392,14 +263,41 @@ ON CONFLICT (id) DO UPDATE SET
   is_deleted = excluded.is_deleted,
   has_body = CASE WHEN excluded.body_fetched THEN excluded.has_body ELSE messages.has_body END,
   body_fetched = messages.body_fetched OR excluded.body_fetched,
-  synced_at = excluded.synced_at
+  synced_at = excluded.synced_at,
+  headers = CASE WHEN excluded.headers IS NOT NULL THEN excluded.headers ELSE messages.headers END
 `
-	stmt, err := tx.PrepareContext(ctx, q)
+
+func (d *DB) UpsertMessages(ctx context.Context, msgs []Message) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	if err := d.acquire(ctx); err != nil {
+		return err
+	}
+	defer d.release()
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := markFTSDirty(ctx, tx); err != nil {
+		return err
+	}
+	if err := upsertMessagesTx(ctx, tx, msgs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func upsertMessagesTx(ctx context.Context, tx *sql.Tx, msgs []Message) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	stmt, err := tx.PrepareContext(ctx, upsertMessageSQL)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
-
 	ids := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		var body any
@@ -423,16 +321,14 @@ ON CONFLICT (id) DO UPDATE SET
 			m.FromName, m.FromEmail, encodeList(m.ToEmails), encodeList(m.CcEmails),
 			m.Subject, m.Snippet, body, m.SizeBytes, encodeList(m.LabelIDs),
 			m.IsRead, m.IsOutgoing, m.IsDeleted, m.HasBody, m.BodyFetched, m.SyncedAt.UTC(),
+			encodeHeaders(m.Headers),
 		)
 		if err != nil {
 			return err
 		}
 		ids = append(ids, m.ID)
 	}
-	if err := refreshSearchTextTx(ctx, tx, ids); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return refreshSearchTextTx(ctx, tx, ids)
 }
 
 func (d *DB) GetMessage(ctx context.Context, id string) (Message, error) {
@@ -440,17 +336,20 @@ func (d *DB) GetMessage(ctx context.Context, id string) (Message, error) {
 SELECT id, thread_id, history_id, internal_date,
        from_name, from_email, to_json(to_emails)::VARCHAR, to_json(cc_emails)::VARCHAR,
        subject, snippet, COALESCE(body, ''), size_bytes, to_json(label_ids)::VARCHAR,
-       is_read, is_outgoing, is_deleted, has_body, body_fetched, synced_at
+       is_read, is_outgoing, is_deleted, has_body, body_fetched, synced_at,
+       to_json(headers)::VARCHAR
 FROM messages WHERE id = ?
 `
 	var m Message
 	var toJSON, ccJSON, labelJSON string
 	var historyID sql.NullInt64
+	var headersJSON sql.NullString
 	err := d.sql.QueryRowContext(ctx, q, id).Scan(
 		&m.ID, &m.ThreadID, &historyID, &m.InternalDate,
 		&m.FromName, &m.FromEmail, &toJSON, &ccJSON,
 		&m.Subject, &m.Snippet, &m.Body, &m.SizeBytes, &labelJSON,
 		&m.IsRead, &m.IsOutgoing, &m.IsDeleted, &m.HasBody, &m.BodyFetched, &m.SyncedAt,
+		&headersJSON,
 	)
 	if err != nil {
 		return Message{}, err
@@ -461,6 +360,7 @@ FROM messages WHERE id = ?
 	m.ToEmails = decodeList(toJSON)
 	m.CcEmails = decodeList(ccJSON)
 	m.LabelIDs = decodeList(labelJSON)
+	m.Headers = decodeHeaders(headersJSON)
 	return m, nil
 }
 
@@ -477,10 +377,10 @@ func (d *DB) ListMessages(ctx context.Context, f ListFilter) ([]Message, error) 
 	if f.Offset > maxOffset {
 		f.Offset = maxOffset
 	}
-	if n := utf8.RuneCountInString(f.Query); n > maxQueryRunes {
-		f.Query = string([]rune(f.Query)[:maxQueryRunes])
+	q, err := search.Parse(f.Query)
+	if err != nil {
+		return nil, err
 	}
-	q := search.Parse(f.Query)
 	if q.Unread {
 		f.Unread = true
 	}
@@ -491,26 +391,19 @@ func (d *DB) ListMessages(ctx context.Context, f ListFilter) ([]Message, error) 
 		f.Before = q.Before
 	}
 
-	var hasFTS bool
-	if q.Text != "" {
+	rank := false
+	if len(q.Terms) > 0 {
 		ok, err := d.hasFTS(ctx)
 		if err != nil {
 			return nil, err
 		}
-		hasFTS = ok
+		rank = ok
 	}
-	short := utf8.RuneCountInString(q.Text) < 2
-	if q.Text != "" && hasFTS {
-		msgs, err := d.listMessages(ctx, f, q, true)
-		if err != nil {
-			if short {
-				return nil, err
-			}
-		} else if len(msgs) > 0 || short {
-			return msgs, nil
-		}
+	msgs, err := d.listMessages(ctx, f, q, rank)
+	if err != nil && rank {
+		return d.listMessages(ctx, f, q, false)
 	}
-	return d.listMessages(ctx, f, q, false)
+	return msgs, err
 }
 
 func (d *DB) listMessages(ctx context.Context, f ListFilter, q search.Query, useFTS bool) ([]Message, error) {
@@ -551,23 +444,20 @@ func (d *DB) listMessages(ctx context.Context, f ListFilter, q search.Query, use
 		b.WriteString(" AND internal_date < ?")
 		args = append(args, f.Before.UTC())
 	}
-	if q.Text != "" {
-		if useFTS {
-			b.WriteString(" AND fts_main_messages.match_bm25(id, ?) IS NOT NULL")
-			args = append(args, q.Text)
-		} else {
-			b.WriteString(" AND search_text ILIKE ?" + likeEscape)
-			args = append(args, likeContains(q.Text))
-		}
+	for _, term := range q.Terms {
+		b.WriteString(" AND (")
+		b.WriteString(searchTextSQL)
+		b.WriteString(") ILIKE ?" + likeEscape)
+		args = append(args, likeContains(term))
 	}
 	searchPage := f.Query != ""
 	if !searchPage && !f.AfterDate.IsZero() && f.AfterID != "" {
 		b.WriteString(" AND (internal_date < ? OR (internal_date = ? AND id < ?))")
 		args = append(args, f.AfterDate.UTC(), f.AfterDate.UTC(), f.AfterID)
 	}
-	if useFTS && q.Text != "" {
-		b.WriteString(" ORDER BY fts_main_messages.match_bm25(id, ?) DESC, internal_date DESC, id DESC LIMIT ?")
-		args = append(args, q.Text, f.Limit)
+	if useFTS && len(q.Terms) > 0 {
+		b.WriteString(" ORDER BY COALESCE(fts_main_messages.match_bm25(id, ?), 0) DESC, internal_date DESC, id DESC LIMIT ?")
+		args = append(args, strings.Join(q.Terms, " "), f.Limit)
 	} else {
 		b.WriteString(" ORDER BY internal_date DESC, id DESC LIMIT ?")
 		args = append(args, f.Limit)
@@ -586,7 +476,16 @@ func (d *DB) listMessages(ctx context.Context, f ListFilter, q search.Query, use
 }
 
 func (d *DB) ResetSeen(ctx context.Context) error {
+	if err := d.acquire(ctx); err != nil {
+		return err
+	}
+	defer d.release()
 	_, err := d.sql.ExecContext(ctx, "DELETE FROM sync_seen")
+	return err
+}
+
+func resetSeenTx(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, "DELETE FROM sync_seen")
 	return err
 }
 
@@ -594,11 +493,25 @@ func (d *DB) AddSeen(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	if err := d.acquire(ctx); err != nil {
+		return err
+	}
+	defer d.release()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := addSeenTx(ctx, tx, ids); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func addSeenTx(ctx context.Context, tx *sql.Tx, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
 	stmt, err := tx.PrepareContext(ctx, "INSERT OR IGNORE INTO sync_seen(id) VALUES (?)")
 	if err != nil {
 		return err
@@ -609,11 +522,34 @@ func (d *DB) AddSeen(ctx context.Context, ids []string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (d *DB) MarkMissingDeleted(ctx context.Context) (int64, error) {
-	res, err := d.sql.ExecContext(ctx, `
+	if err := d.acquire(ctx); err != nil {
+		return 0, err
+	}
+	defer d.release()
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := markFTSDirty(ctx, tx); err != nil {
+		return 0, err
+	}
+	n, err := markMissingDeletedTx(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func markMissingDeletedTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+	res, err := tx.ExecContext(ctx, `
 UPDATE messages SET is_deleted = true
 WHERE NOT is_deleted AND id NOT IN (SELECT id FROM sync_seen)
 `)
@@ -624,7 +560,7 @@ WHERE NOT is_deleted AND id NOT IN (SELECT id FROM sync_seen)
 	if err != nil {
 		return 0, err
 	}
-	if err := d.ResetSeen(ctx); err != nil {
+	if err := resetSeenTx(ctx, tx); err != nil {
 		return n, err
 	}
 	return n, nil
@@ -634,11 +570,28 @@ func (d *DB) MarkDeleted(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	if err := d.acquire(ctx); err != nil {
+		return err
+	}
+	defer d.release()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := markFTSDirty(ctx, tx); err != nil {
+		return err
+	}
+	if err := markDeletedTx(ctx, tx, ids); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func markDeletedTx(ctx context.Context, tx *sql.Tx, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
 	stmt, err := tx.PrepareContext(ctx, "UPDATE messages SET is_deleted = true WHERE id = ?")
 	if err != nil {
 		return err
@@ -649,57 +602,31 @@ func (d *DB) MarkDeleted(ctx context.Context, ids []string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (d *DB) UpdateLabels(ctx context.Context, id string, labels []string, isRead bool) error {
 	if labels == nil {
 		labels = []string{}
 	}
-	_, err := d.sql.ExecContext(ctx, `
-UPDATE messages SET label_ids = CAST(? AS VARCHAR[]), is_read = ? WHERE id = ?
-`, encodeList(labels), isRead, id)
-	return err
-}
-
-func (d *DB) UpdateBody(ctx context.Context, id, body string) error {
-	_, err := d.sql.ExecContext(ctx, `
-UPDATE messages SET body = ?, has_body = (? <> ''), body_fetched = true, synced_at = ? WHERE id = ?
-`, body, body, time.Now().UTC(), id)
+	if err := d.acquire(ctx); err != nil {
+		return err
+	}
+	defer d.release()
+	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	return refreshSearchTextTx(ctx, d.sql, []string{id})
-}
-
-func (d *DB) IDsNeedingFetch(ctx context.Context, afterID string, limit int) ([]string, error) {
-	if limit <= 0 {
-		limit = 500
+	defer func() { _ = tx.Rollback() }()
+	if err := markFTSDirty(ctx, tx); err != nil {
+		return err
 	}
-	q := `
-SELECT id FROM messages
-WHERE NOT COALESCE(body_fetched, false) AND NOT is_deleted`
-	args := make([]any, 0, 2)
-	if afterID != "" {
-		q += ` AND id > ?`
-		args = append(args, afterID)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE messages SET label_ids = `+listSQL+`, is_read = ? WHERE id = ?
+`, encodeList(labels), isRead, id); err != nil {
+		return err
 	}
-	q += ` ORDER BY id LIMIT ?`
-	args = append(args, limit)
-	rows, err := d.sql.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
+	return tx.Commit()
 }
 
 func (d *DB) MissingIDs(ctx context.Context, ids []string) ([]string, error) {
@@ -770,10 +697,17 @@ func (d *DB) LabelMap(ctx context.Context) (map[string]string, error) {
 }
 
 func (d *DB) SetState(ctx context.Context, key, value string) error {
-	_, err := d.sql.ExecContext(ctx, `
+	_, err := d.sql.ExecContext(ctx, setStateSQL, key, value)
+	return err
+}
+
+const setStateSQL = `
 INSERT INTO sync_state(key, value) VALUES (?, ?)
 ON CONFLICT (key) DO UPDATE SET value = excluded.value
-`, key, value)
+`
+
+func setStateTx(ctx context.Context, tx *sql.Tx, key, value string) error {
+	_, err := tx.ExecContext(ctx, setStateSQL, key, value)
 	return err
 }
 
@@ -794,32 +728,9 @@ func (d *DB) ClearState(ctx context.Context, key string) error {
 	return err
 }
 
-func (d *DB) RebuildFTS(ctx context.Context) error {
-	_, err := d.sql.ExecContext(ctx, `
-PRAGMA create_fts_index('messages', 'id', 'search_text', overwrite=1)
-`)
-	if err != nil {
-		return fmt.Errorf("fts: %w", err)
-	}
-	if err := d.SetState(ctx, stateFTSIndex, ftsIndexVer); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (d *DB) EnsureFTS(ctx context.Context) error {
-	ok, err := d.hasFTS(ctx)
-	if err != nil {
-		return err
-	}
-	ver, _, err := d.GetState(ctx, stateFTSIndex)
-	if err != nil {
-		return err
-	}
-	if ok && ver == ftsIndexVer {
-		return nil
-	}
-	return d.RebuildFTS(ctx)
+func clearStateTx(ctx context.Context, tx *sql.Tx, key string) error {
+	_, err := tx.ExecContext(ctx, "DELETE FROM sync_state WHERE key = ?", key)
+	return err
 }
 
 func likeContains(s string) string {
@@ -827,46 +738,6 @@ func likeContains(s string) string {
 	s = strings.ReplaceAll(s, `%`, `\%`)
 	s = strings.ReplaceAll(s, `_`, `\_`)
 	return "%" + s + "%"
-}
-
-func refreshSearchTextTx(ctx context.Context, ex execer, ids []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	var b strings.Builder
-	b.WriteString("UPDATE messages SET search_text = ")
-	b.WriteString(searchTextSQL)
-	b.WriteString(" WHERE id IN (")
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteByte('?')
-		args[i] = id
-	}
-	b.WriteByte(')')
-	_, err := ex.ExecContext(ctx, b.String(), args...)
-	return err
-}
-
-func (d *DB) hasFTS(ctx context.Context) (bool, error) {
-	var n int
-	err := d.sql.QueryRowContext(ctx, `
-SELECT count(*) FROM duckdb_schemas() WHERE schema_name = 'fts_main_messages'
-`).Scan(&n)
-	if err != nil {
-		return false, err
-	}
-	ver, _, err := d.GetState(ctx, stateFTSIndex)
-	if err != nil {
-		return false, err
-	}
-	return n > 0 && ver == ftsIndexVer, nil
-}
-
-func (d *DB) HasFTS(ctx context.Context) (bool, error) {
-	return d.hasFTS(ctx)
 }
 
 func (d *DB) Coverage(ctx context.Context) (Coverage, error) {
@@ -904,11 +775,39 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 }
 
 func encodeList(v []string) string {
+	if v == nil {
+		v = []string{}
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		return "[]"
 	}
 	return string(b)
+}
+
+func encodeHeaders(h []Header) any {
+	if h == nil {
+		return nil
+	}
+	b, err := json.Marshal(h)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+func decodeHeaders(s sql.NullString) []Header {
+	if !s.Valid || s.String == "" || s.String == "null" {
+		return nil
+	}
+	var out []Header
+	if err := json.Unmarshal([]byte(s.String), &out); err != nil {
+		return nil
+	}
+	if out == nil {
+		return []Header{}
+	}
+	return out
 }
 
 func decodeList(s string) []string {

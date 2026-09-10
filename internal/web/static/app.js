@@ -92,7 +92,7 @@ async function loadList() {
     const r = await api("/api/messages?" + qs(), { signal });
     j = await r.json();
     if (!r.ok) {
-      if (!listEl.querySelector(".row")) listEl.textContent = "Search failed.";
+      listEl.textContent = j.error || "Search failed.";
       moreEl.hidden = true;
       return;
     }

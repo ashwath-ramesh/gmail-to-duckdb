@@ -4,9 +4,11 @@ Inspired by: https://github.com/marcboeker/gmail-to-sqlite
 
 A local CLI that syncs Gmail into a DuckDB file on your machine.
 
-Mail never leaves your computer. Connect Gmail with OAuth. Query it with SQL or JSON.
+This is a local search and analysis copy. It is not a complete backup. It does not store attachments or raw RFC822. It cannot restore mail to Gmail. For full backup and restore, use [Got Your Back](https://github.com/GAM-team/got-your-back).
 
-DuckDB makes analytics and search fast after sync. Browse mail in the local UI. Agents and scripts use the `--json` commands.
+Gmail downloads mail to this computer. The app does not upload mail to another service. Agents or scripts that you run may send query outputs elsewhere.
+
+Browse mail in the local UI. Agents and scripts use the `--json` commands.
 
 ## Stack
 
@@ -51,15 +53,17 @@ cd gmail-to-duckdb
 go build -o gmail-to-duckdb ./cmd/gmail-to-duckdb
 ```
 
-Each user uses their own Google Cloud OAuth client. Do not copy someone else’s `credentials.json` or `*.token.json`.
+Use your own Google Cloud OAuth client. Do not copy another person’s `credentials.json` or `*.token.json`.
 
 ## Setup
 
 1. Create a Google Cloud project.
 2. Enable the Gmail API.
-3. Create OAuth 2.0 credentials for a Desktop app.
-4. Save the JSON file.
-5. Write a stable config:
+3. Configure the OAuth consent screen. Use Internal only when the project is associated with an organization and only users in that organization sign in. Otherwise use External. If the app is External and in Testing, add yourself as a test user.
+4. Create OAuth 2.0 credentials for a Desktop app. The app requests `gmail.readonly`.
+5. Save the JSON file.
+
+External apps in Testing expire refresh tokens after seven days. Workspace admins can block or restrict access. See [Google’s OAuth testing note](https://support.google.com/cloud/answer/15549945?hl=en).
 
 ```bash
 gmail-to-duckdb init --credentials PATH/to/credentials.json
@@ -68,7 +72,7 @@ gmail-to-duckdb doctor
 
 `init` writes `~/.config/gmail-to-duckdb/config.json`. It copies the client JSON next to that file. The default database is `~/.local/share/gmail-to-duckdb/mail.duckdb`.
 
-`doctor` checks credentials, the token, the database, FTS, ports, and a running `serve` process. Use `doctor --json` for agents. Pass `--port` to match a custom UI port. If `serve` is running, `doctor` uses that process and does not open DuckDB itself. The token and database checks fail until the first sign-in.
+`doctor` checks credentials, the local token file, the database, FTS, ports, and a running `serve` process. Use `doctor --json` for agents. Pass `--port` to match a custom UI port. If `serve` is running, `doctor` uses that process and does not open DuckDB itself. The token and database checks fail until the first sign-in. The token check only validates local presence, shape, and scope. It cannot prove that Google will refresh the token.
 
 6. Start the app:
 
@@ -76,25 +80,9 @@ gmail-to-duckdb doctor
 gmail-to-duckdb serve --sync-every 5m
 ```
 
-The first run opens a localhost OAuth page. The callback is `http://127.0.0.1:41807/` unless you set `--oauth-port`. Each sign-in creates a new random `state` and a PKCE S256 challenge. The callback must send exactly one matching `state`. A missing, reused, wrong, or duplicate `state` is rejected. A callback may send one `code` or one `error`, not both. A malformed query is rejected. Sign-in stays open after an invalid callback. The token exchange sends the matching `code_verifier`. The token is stored next to the database as `*.token.json`. The token is not stored in DuckDB.
+The first run opens a localhost OAuth page. Details for the callback, PKCE, private files, SQL restrictions, and loopback rules are in [docs/security.md](docs/security.md).
 
-Secret files (`credentials.json` copy, `*.token.json`, `*.serve.json`, and `config.json`) are written as private files:
-
-- Unix: files use mode `0600`. New app directories use mode `0700`. Existing parent directories stay unchanged.
-- Windows: the current user and SYSTEM get access. Inherited access from other users is blocked.
-- A write creates a private temp file in the same directory, writes the bytes, syncs, then replaces the destination as one file.
-- A reader sees only the previous complete JSON or the new complete JSON.
-- A later write replaces an existing shared file with a private file.
-- A symlink destination or a non-regular file is rejected.
-- A private read checks owner and file type, then tightens permissions, before it reads bytes. It does not follow a symlink.
-
-If the CLI runs on a remote host and you sign in on a laptop, open the tunnel **before** you click Allow:
-
-```bash
-ssh -L 41807:127.0.0.1:41807 USER@REMOTE
-```
-
-Or copy the redirect URL from the laptop and paste it into the remote prompt. The URL must use `127.0.0.1` and the listen port. It must include the same `state`. It must not include a user name or a fragment. You can also paste the `code=` value or the raw code. The exchange is bound to this sign-in by PKCE. If the paste includes `state`, including a percent-encoded `state` key, it must match. A URL on another host is rejected.
+If Google rejects the refresh token, stop `serve`. Remove only the `*.token.json` file for the chosen database. The token basename comes from the database path: `mail.duckdb` uses `mail.token.json`. Run `sync` and sign in with the same account. Do not remove the database or `credentials.json`.
 
 Flags override the config file. If no config file exists, the working directory defaults stay `mail.duckdb` and `credentials.json`.
 
@@ -117,13 +105,13 @@ gmail-to-duckdb sql --json < query.sql
 
 `serve` owns the database. It runs an incremental metadata sync at startup and on `--sync-every`. The UI shows last success, phase, processed count, last error, and body coverage. Use **Sync now** to run a sync without leaving the UI.
 
+`last_sync` is the last completed sync. It is not a “work in progress” stamp.
+
 `ui` is the same process. It does not sync at startup unless you pass `--sync-every`.
 
 `sync` stays available for one-shot jobs. If `serve` is running, `sync` and the query commands call its HTTP API. If a serve file exists but serve is down, those commands fail. They do not open the locked DuckDB file. If no serve file exists, they open DuckDB.
 
-`sql` is read-only by default. Pass `--write` for ordinary database DML and DDL only. `--write` does not allow transaction control, settings changes, extension install or load, `ATTACH`/`DETACH`, `COPY`, import/export, or external files. `--read-only` is an explicit no-op for agents. Both modes disable DuckDB external file access and lock that configuration.
-
-Dynamic `PIVOT table ON ...` is rejected. DuckDB expands that form into writes and multiple statements. Use `FROM table PIVOT (...)` for a supported read.
+One Gmail account binds to one database. A different account is an error. Use another `--db`.
 
 Flags:
 
@@ -134,17 +122,26 @@ Flags:
 - `--json`
 - `--duckdb-ui` (`serve` / `ui`)
 
-`serve` and `ui` bind `127.0.0.1` only. The browser Host must be `127.0.0.1` or `localhost` on the listen port. Cross-site and other local-port origins are rejected. The browser gets an HttpOnly session cookie. The CLI sends `X-Token` from `*.serve.json`. The token is not in the printed URL. Do not run them on a shared host if other users can reach your loopback port.
+Mail lists metadata. Open a message and use Fetch body to pull one body from Gmail.
 
-The DuckDB UI on port 4213 has no session token. It stays off unless you pass `--duckdb-ui`. Treat that flag as full database access on loopback.
-
-Mail lists metadata. Open a message and use Fetch body to pull one body from Gmail. A completed fetch with no text shows **No text body**. The UI hides Fetch body after a completed empty fetch. The Stats page runs the bundled SQL files. Use `sql` or pass `--duckdb-ui` for ad-hoc SQL.
-
-Mail search is one box. Type words. The index covers from, to, cc, subject, snippet, and body. Sync builds that index. Bodies are optional. Status `with_body` counts messages that have a nonempty body. `body_fetched` marks a finished full fetch, even when the message has no text.
+- A pending body is not fetched yet.
+- A completed fetch with no text is fetched-empty. The UI shows **No text body** and hides Fetch body.
+- `with_body` counts messages that have a nonempty body.
+- `body_fetched` marks a finished full fetch, even when the message has no text.
 
 `sync --bodies` walks pending ids in ordered pages. Each pending id is attempted once per sync. Missing or unparseable replies stay pending for the next sync. The run does not loop those ids again. Transport errors still stop after the existing Gmail retry limit.
 
-Operators in the same box:
+Spam and Trash are included. Permanent deletions stay in the local file with `is_deleted`. Ordinary search and reports exclude those rows.
+
+`fts` false means the full-text index is pending or unavailable. Literal search still works.
+
+SQL defaults and write guards are in [docs/security.md](docs/security.md).
+
+## Search
+
+Search uses case-insensitive literal substrings. All terms are AND. Quoted phrases are literal contiguous text. Quoted filter values work: `subject:"payment received"`. `%` and `_` are literal. Full-text ranking only. Membership does not use stemming. Order falls back to date, then id.
+
+Supported operators:
 
 - `from:bob`
 - `to:jane`
@@ -153,7 +150,23 @@ Operators in the same box:
 - `after:2024-01-01`
 - `before:2024-06-01`
 
-Use the Unread chip for the same unread filter. Results rank by relevance, then date.
+`after` is UTC inclusive. `before` is UTC exclusive.
+
+Quote a complete token to search literal colon text.
+
+These inputs are validation errors: unsupported operators; empty or repeated singleton filters; bad dates or ranges; unmatched quotes; more than 200 runes.
+
+Use the Unread chip for the same unread filter.
+
+## Reports
+
+The Stats page runs the bundled SQL files. Existing size ranking stays. Three added reports:
+
+1. Top incoming sender domains by message count and estimated bytes.
+2. Top outgoing recipient domains from To/Cc. One domain counts once per message. Bytes are the estimated message size, counted once per domain per message. This is not a storage-savings figure.
+3. Monthly incoming counts for the top 25 sender addresses over the current UTC calendar month and the preceding 11 months.
+
+Reports include Spam and Trash. They exclude permanently deleted rows.
 
 ## Agent interface
 
@@ -179,31 +192,26 @@ Human CLI output escapes terminal controls, bidi overrides and isolates, and inv
 
 ## Schema
 
-`schema_version` is `2`.
+`schema_version` is `3`.
 
 `messages` stores typed columns: ids, timestamps, from, to, cc, subject, snippet, nullable body, labels, read/outgoing/deleted flags, `has_body`, `body_fetched`, and `search_text` for one-box search.
 
 - `has_body` is true only when the stored body is nonempty.
 - `body_fetched` is true after a successful full fetch or on-demand body write, even when the body is empty.
+- The SENT label determines outgoing.
+- Upgrading to v3 requeues legacy fetched-empty bodies once. Only an explicit body request fetches them.
 
-A v1 mailbox gains `body_fetched` on open. The migration copies the old `has_body` flag, then sets `has_body` from the real body text. Mail rows and other `sync_state` keys stay. The version changes only after that work commits.
+`headers` is a nullable ordered JSON array. Ordinary message result lists omit it. `sql` returns the header values. `schema` describes the column type and does not return header values. The array keeps every Gmail top-level header name, value, order, and duplicate. `NULL` means headers are not yet collected. An old message may already be fetched. `[]` means a fetch found no headers.
+
+The v3 migration is local. It does not call the network. Run `sync --full` to backfill headers. Later metadata syncs refresh headers with ordinary metadata.
 
 `labels` maps Gmail label ids to names.
 
-`sync_state` stores `history_id`, resume tokens, `schema_version`, and last sync times.
+`sync_state` stores `history_id`, resume tokens, `schema_version`, and last sync times. A legacy partial cursor without a reliable anchor restarts safely.
 
 ## Privacy
 
-- Mail is written only to the local DuckDB file.
+- Mail is written only to the local DuckDB file. The file is plaintext. Owner-only permissions are not encryption.
 - The HTTP UI listens on loopback.
 - Keep `credentials.json`, `*.token.json`, `*.serve.json`, and `*.duckdb` out of git.
-- Secret files are owner-only. Unix uses `0600`. Windows uses current-user and SYSTEM ACLs.
-- The process sets Unix umask `077` once at start. It does not restore the previous umask.
-- The database path stays where you set it. The tool does not move the file. The path is a filesystem path. A NUL byte, DSN options after `?`, or an in-memory URL is a startup error. A Windows drive colon is allowed.
-- Before DuckDB opens the mailbox, the tool hardens an existing database and known WAL sidecars (`.wal`, `.wal.checkpoint`, `.wal.recovery`) when they are regular files you own. It does not delete WAL files. A symlink or a file you do not own is a startup error.
-- DuckDB temp and spill files use a private directory next to the database (`*.duckdb.tmp`). Existing files in that directory are made private. A symlink or other non-regular entry in that directory is a startup error. The tool does not follow or delete those entries, and it does not change files outside that directory.
-- New database files use mode `0600`. New private directories use mode `0700`. Windows uses current-user and SYSTEM ACLs, with inheritance on those directories, before DuckDB creates files.
-- Unix accepts a custom parent that is only traversable (mode `0755`) because umask `077` still creates private files. A parent that is writable by group or other is refused. The tool does not chmod a custom directory.
-- Windows requires a private inherited parent (current user and SYSTEM only) so DuckDB-created files stay private. The parent must inherit current-user protection to files and subdirectories. An inherit-only ACE for another trustee is refused. A custom unsafe parent is refused. `init` hardens the configured app config and data directories only.
-- Windows also accepts the process token owner (often Administrators when the process is elevated) together with a tight DACL (current user, SYSTEM, and that token owner only). It does not trust an Admin-owned file that allows other trustees.
-- A serve file that exists but is unreadable or unsafe is a hard error. The tool does not fall back to opening the database.
+- See [docs/security.md](docs/security.md) for OAuth, private files, SQL restrictions, FTS extension downloads, and database path rules.

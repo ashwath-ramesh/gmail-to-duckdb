@@ -35,8 +35,8 @@ func TestGetAndOnDemandBodyFlags(t *testing.T) {
 		t.Fatalf("full %#v", full)
 	}
 
-	s.FetchBody = func(ctx context.Context, id string) (string, error) {
-		return "", nil
+	s.FetchBody = func(ctx context.Context, id string) error {
+		return db.UpdateBody(ctx, id, "")
 	}
 	w := req(t, h, http.MethodPost, "/api/messages/empty/body")
 	if w.Code != 200 {
@@ -54,8 +54,8 @@ func TestGetAndOnDemandBodyFlags(t *testing.T) {
 		t.Fatalf("empty json %#v", empty)
 	}
 
-	s.FetchBody = func(ctx context.Context, id string) (string, error) {
-		return "fetched body", nil
+	s.FetchBody = func(ctx context.Context, id string) error {
+		return db.UpdateBody(ctx, id, "fetched body")
 	}
 	w = req(t, h, http.MethodPost, "/api/messages/m1/body")
 	if w.Code != 200 {
@@ -73,6 +73,24 @@ func TestGetAndOnDemandBodyFlags(t *testing.T) {
 	}
 	if env.BodyCoverage.WithBody != 2 || env.BodyCoverage.Total != 3 {
 		t.Fatalf("coverage %+v", env.BodyCoverage)
+	}
+}
+
+func TestOnDemand404IsHTTP404(t *testing.T) {
+	s, db := testServer(t)
+	s.FetchBody = func(ctx context.Context, id string) error {
+		return mailsync.ErrNotFound
+	}
+	w := req(t, s.Handler(), http.MethodPost, "/api/messages/m1/body")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("code %d %s", w.Code, w.Body.String())
+	}
+	got, err := db.GetMessage(context.Background(), "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BodyFetched {
+		t.Fatalf("404 must not mark fetched %+v", got)
 	}
 }
 
@@ -144,10 +162,10 @@ func (a *blockFullAPI) ListMessages(context.Context, string) ([]string, string, 
 func (a *blockFullAPI) History(context.Context, uint64, string) (gmail.HistoryPage, error) {
 	return gmail.HistoryPage{HistoryID: 9}, nil
 }
-func (a *blockFullAPI) Get(context.Context, string, string) ([]byte, error) {
-	return nil, errors.New("unused")
+func (a *blockFullAPI) Get(context.Context, string, string) (gmail.FetchResult, error) {
+	return gmail.FetchResult{}, errors.New("unused")
 }
-func (a *blockFullAPI) BatchGet(ctx context.Context, ids []string, format string) ([][]byte, error) {
+func (a *blockFullAPI) BatchGet(ctx context.Context, ids []string, format string) ([]gmail.FetchResult, error) {
 	if format != "full" {
 		return nil, nil
 	}
@@ -165,10 +183,10 @@ func (a *blockFullAPI) BatchGet(ctx context.Context, ids []string, format string
 			return nil, errors.New("released")
 		}
 	}
-	var out [][]byte
+	var out []gmail.FetchResult
 	for _, id := range ids {
 		if b, ok := a.full[id]; ok {
-			out = append(out, b)
+			out = append(out, gmail.FetchResult{ID: id, Status: gmail.FetchOK, Raw: b})
 		}
 	}
 	return out, nil

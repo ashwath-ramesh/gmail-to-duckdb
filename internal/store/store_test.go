@@ -1013,7 +1013,7 @@ func TestCoverageAndSchemaVersion(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	v, ok, err := db.GetState(ctx, StateSchemaVersion)
-	if err != nil || !ok || v != "2" {
+	if err != nil || !ok || v != "3" {
 		t.Fatalf("schema version %q %v %v", v, ok, err)
 	}
 	c, err := db.Coverage(ctx)

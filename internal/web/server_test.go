@@ -44,8 +44,11 @@ func testServer(t *testing.T) (*Server, *store.DB) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{DB: db, Token: "test", AllowedHosts: AllowedHosts(8080), FetchBody: func(ctx context.Context, id string) (string, error) {
-		return "fetched body", nil
+	if err := db.SetState(ctx, store.StateProfileEmail, "me@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{DB: db, Token: "test", AllowedHosts: AllowedHosts(8080), FetchBody: func(ctx context.Context, id string) error {
+		return db.UpdateBody(ctx, id, "fetched body")
 	}}
 	return s, db
 }
@@ -141,6 +144,39 @@ func TestSearchQuery(t *testing.T) {
 	}
 }
 
+func TestSearchValidationHTTP(t *testing.T) {
+	s, _ := testServer(t)
+	h := s.Handler()
+	w := req(t, h, http.MethodGet, "/api/messages?q=after:nope")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("code %d %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Error == "" || !strings.Contains(strings.ToLower(out.Error), "after") {
+		t.Fatalf("error %q", out.Error)
+	}
+	w = req(t, h, http.MethodGet, "/api/messages?q=from:a@x.com")
+	if w.Code != http.StatusOK {
+		t.Fatalf("valid %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSearchDBFailureHTTP(t *testing.T) {
+	s, db := testServer(t)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	w := req(t, s.Handler(), http.MethodGet, "/api/messages?q=hello")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("code %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestHTMLBodySanitized(t *testing.T) {
 	s, db := testServer(t)
 	if err := db.UpdateBody(context.Background(), "m1", `<p>Hi<script>alert(1)</script></p>`); err != nil {
@@ -218,9 +254,9 @@ func TestStats(t *testing.T) {
 func TestBodyRequiresExisting(t *testing.T) {
 	s, _ := testServer(t)
 	called := false
-	s.FetchBody = func(ctx context.Context, id string) (string, error) {
+	s.FetchBody = func(ctx context.Context, id string) error {
 		called = true
-		return "x", nil
+		return nil
 	}
 	h := s.Handler()
 	w := req(t, h, http.MethodPost, "/api/messages/missing/body")
@@ -345,7 +381,7 @@ func TestStatusSchemaSQL(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
-	if env.SchemaVersion != 2 || env.Phase != "idle" {
+	if env.SchemaVersion != 3 || env.Phase != "idle" {
 		t.Fatalf("%+v", env)
 	}
 	if env.UntrustedContent {
