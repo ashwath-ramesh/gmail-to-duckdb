@@ -17,7 +17,12 @@ const (
 	stateListPage     = "list_page_token"
 	stateHistoryPage  = "history_page_token"
 	stateHistoryStart = "history_start_id"
-	stateProfile      = "profile_email"
+	stateFullStart    = "full_start_history_id"
+	stateFullPhase    = "full_phase"
+
+	phaseList     = "list"
+	phaseListFull = "list_full"
+	phaseCatchup  = "catchup"
 
 	bodyPageSize = 50
 	persistBound = 10 * time.Second
@@ -36,13 +41,17 @@ type Progress struct {
 }
 
 type Runner struct {
-	DB         *store.DB
-	API        gmail.API
-	Log        func(string, ...any)
-	OnProgress func(Progress)
-	wrote      bool
-	processed  int
-	phase      string
+	DB            *store.DB
+	API           gmail.API
+	Log           func(string, ...any)
+	OnProgress    func(Progress)
+	processed     int
+	phase         string
+	fullRestarted bool
+}
+
+func persistContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), persistBound)
 }
 
 func (r *Runner) logf(format string, args ...any) {
@@ -58,31 +67,38 @@ func (r *Runner) progress(phase string) {
 	}
 }
 
-func (r *Runner) finish(ctx context.Context, err error) error {
-	write := context.WithoutCancel(ctx)
+func (r *Runner) finish(err error) error {
+	write, cancel := persistContext()
+	defer cancel()
 	if err != nil {
-		_ = r.DB.SetState(write, store.StateLastSyncError, err.Error())
+		if werr := r.DB.SetState(write, store.StateLastSyncError, err.Error()); werr != nil {
+			return errors.Join(err, werr)
+		}
 		return err
 	}
-	_ = r.DB.ClearState(write, store.StateLastSyncError)
-	_ = r.DB.SetState(write, store.StateLastSyncOK, time.Now().UTC().Format(time.RFC3339))
+	if werr := r.DB.ClearState(write, store.StateLastSyncError); werr != nil {
+		return werr
+	}
+	if werr := r.DB.SetState(write, store.StateLastSyncOK, time.Now().UTC().Format(time.RFC3339)); werr != nil {
+		return werr
+	}
 	r.progress("idle")
 	return nil
 }
 
 func (r *Runner) Sync(ctx context.Context, opt Options) error {
-	return r.finish(ctx, r.sync(ctx, opt))
+	return r.finish(r.sync(ctx, opt))
 }
 
 func (r *Runner) sync(ctx context.Context, opt Options) error {
-	r.wrote = false
 	r.processed = 0
+	r.fullRestarted = false
 	r.progress("profile")
 	profile, err := r.API.Profile(ctx)
 	if err != nil {
 		return fmt.Errorf("profile: %w", err)
 	}
-	if err := r.DB.SetState(ctx, stateProfile, profile.Email); err != nil {
+	if err := r.DB.BindAccount(ctx, profile.Email); err != nil {
 		return err
 	}
 	r.progress("labels")
@@ -98,38 +114,32 @@ func (r *Runner) sync(ctx context.Context, opt Options) error {
 	if err != nil {
 		return err
 	}
-	startHist := profile.HistoryID
-	didFull := opt.Full || !hasHist
-	if didFull {
-		if err := r.clearHistoryResume(ctx); err != nil {
+	resume, markDeleted, err := r.inspectFullResume(ctx, opt, hasHist, profile)
+	if err != nil {
+		return err
+	}
+	if resume {
+		if err := r.runFull(ctx, profile, markDeleted); err != nil {
 			return err
 		}
-		if err := r.full(ctx, opt.Full); err != nil {
+	} else if opt.Full || !hasHist {
+		if err := r.prepareFull(ctx, profile.HistoryID, opt.Full, true); err != nil {
 			return err
 		}
-		if err := r.afterFull(ctx, startHist); err != nil {
+		if err := r.runFull(ctx, profile, opt.Full); err != nil {
 			return err
 		}
 	} else {
 		start, _ := strconv.ParseUint(hist, 10, 64)
 		if err := r.incremental(ctx, start); err != nil {
-			if !errors.Is(err, gmail.ErrHistoryGone) {
+			if !expiredHistory(err) {
 				return err
 			}
-			r.logf("history id expired; falling back to full list")
-			if err := r.clearHistoryResume(ctx); err != nil {
+			r.logf("history expired; falling back to full list")
+			if err := r.restartFull(ctx, profile.HistoryID, true, true); err != nil {
 				return err
 			}
-			if err := r.DB.ClearState(ctx, stateListPage); err != nil {
-				return err
-			}
-			if err := r.DB.ResetSeen(ctx); err != nil {
-				return err
-			}
-			if err := r.full(ctx, true); err != nil {
-				return err
-			}
-			if err := r.afterFull(ctx, startHist); err != nil {
+			if err := r.runFull(ctx, profile, true); err != nil {
 				return err
 			}
 		}
@@ -137,87 +147,223 @@ func (r *Runner) sync(ctx context.Context, opt Options) error {
 
 	var bodyErr error
 	if opt.Bodies {
-		bodyErr = r.bodies(ctx, profile.Email)
+		bodyErr = r.bodies(ctx)
 	}
-	if r.wrote {
-		r.progress("fts")
-		r.logf("rebuilding fts")
-		if err := r.DB.RebuildFTS(ctx); err != nil {
-			if bodyErr != nil {
-				return errors.Join(err, bodyErr)
-			}
-			return err
+	if err := ctx.Err(); err != nil {
+		if bodyErr != nil {
+			return errors.Join(err, bodyErr)
 		}
+		return err
+	}
+	r.progress("fts")
+	if err := r.DB.EnsureFTS(ctx); err != nil {
+		if bodyErr != nil {
+			return errors.Join(err, bodyErr)
+		}
+		return err
 	}
 	return bodyErr
 }
 
-func (r *Runner) clearHistoryResume(ctx context.Context) error {
-	if err := r.DB.ClearState(ctx, stateHistoryPage); err != nil {
-		return err
-	}
-	return r.DB.ClearState(ctx, stateHistoryStart)
+func expiredHistory(err error) bool {
+	return errors.Is(err, gmail.ErrHistoryGone) || errors.Is(err, gmail.ErrPageTokenExpired)
 }
 
-func (r *Runner) afterFull(ctx context.Context, startHist uint64) error {
-	if startHist == 0 {
-		return nil
+func (r *Runner) inspectFullResume(ctx context.Context, opt Options, hasHist bool, profile gmail.Profile) (bool, bool, error) {
+	phase, hasPhase, err := r.DB.GetState(ctx, stateFullPhase)
+	if err != nil {
+		return false, false, err
 	}
-	if err := r.DB.SetState(ctx, stateHistoryID, strconv.FormatUint(startHist, 10)); err != nil {
+	_, hasList, err := r.DB.GetState(ctx, stateListPage)
+	if err != nil {
+		return false, false, err
+	}
+	anchor, hasAnchor, err := r.DB.GetState(ctx, stateFullStart)
+	if err != nil {
+		return false, false, err
+	}
+	trustworthy := hasAnchor && parseUint(anchor) > 0
+	if hasPhase {
+		if !knownPhase(phase) {
+			mark := opt.Full || hasHist
+			if err := r.restartFull(ctx, profile.HistoryID, mark, !trustworthy); err != nil {
+				return false, false, err
+			}
+			return true, mark, nil
+		}
+		mark := phase == phaseListFull || opt.Full
+		if !trustworthy && (phase == phaseList || phase == phaseListFull) {
+			if err := r.restartFull(ctx, profile.HistoryID, mark, true); err != nil {
+				return false, false, err
+			}
+			return true, mark, nil
+		}
+		if opt.Full && phase == phaseList {
+			write, cancel := persistContext()
+			err := r.DB.SetState(write, stateFullPhase, phaseListFull)
+			cancel()
+			if err != nil {
+				return false, false, err
+			}
+			mark = true
+		}
+		return true, mark, nil
+	}
+	if hasList && !trustworthy {
+		mark := opt.Full || hasHist
+		if err := r.restartFull(ctx, profile.HistoryID, mark, true); err != nil {
+			return false, false, err
+		}
+		return true, mark, nil
+	}
+	if hasList && trustworthy {
+		return true, opt.Full, nil
+	}
+	return false, false, nil
+}
+
+func (r *Runner) prepareFull(ctx context.Context, anchor uint64, markDeleted, replaceAnchor bool) error {
+	write, cancel := persistContext()
+	defer cancel()
+	if !replaceAnchor {
+		cur, ok, err := r.DB.GetState(write, stateFullStart)
+		if err != nil {
+			return err
+		}
+		if !ok || parseUint(cur) == 0 {
+			replaceAnchor = true
+		}
+	}
+	phase := phaseList
+	if markDeleted {
+		phase = phaseListFull
+	}
+	p := store.PageCommit{
+		ResetSeen:    true,
+		ListPage:     store.StateClear(),
+		HistoryPage:  store.StateClear(),
+		HistoryStart: store.StateClear(),
+		FullPhase:    store.StateValue(phase),
+	}
+	if replaceAnchor {
+		p.FullStartID = store.StateValue(strconv.FormatUint(anchor, 10))
+	}
+	return r.DB.CommitSyncPage(write, p)
+}
+
+func (r *Runner) restartFull(ctx context.Context, anchor uint64, markDeleted, replaceAnchor bool) error {
+	already := r.fullRestarted
+	r.fullRestarted = true
+	if err := r.prepareFull(ctx, anchor, markDeleted, replaceAnchor); err != nil {
 		return err
 	}
-	if err := r.incremental(ctx, startHist); err != nil && !errors.Is(err, gmail.ErrHistoryGone) {
+	if already {
+		return gmail.ErrPageTokenExpired
+	}
+	return nil
+}
+
+func (r *Runner) runFull(ctx context.Context, profile gmail.Profile, markDeleted bool) error {
+	phase, _, err := r.DB.GetState(ctx, stateFullPhase)
+	if err != nil {
+		return err
+	}
+	if phase != "" && !knownPhase(phase) {
+		return fmt.Errorf("unknown full_phase %q", phase)
+	}
+	startedCatchup := phase == phaseCatchup
+	if phase == "" || phase == phaseList || phase == phaseListFull {
+		if err := r.list(ctx, markDeleted || phase == phaseListFull); err != nil {
+			return err
+		}
+		phase = phaseCatchup
+	}
+	if phase == phaseCatchup {
+		err := r.afterFull(ctx)
+		if err == nil {
+			return nil
+		}
+		if startedCatchup && expiredHistory(err) && !r.fullRestarted {
+			r.logf("catchup history expired; starting a new full list")
+			if err := r.restartFull(ctx, profile.HistoryID, true, true); err != nil {
+				return err
+			}
+			return r.runFull(ctx, profile, true)
+		}
 		return err
 	}
 	return nil
 }
 
-func (r *Runner) full(ctx context.Context, markDeleted bool) error {
-	pageTok, hasTok, err := r.DB.GetState(ctx, stateListPage)
+func (r *Runner) afterFull(ctx context.Context) error {
+	anchor, ok, err := r.DB.GetState(ctx, stateFullStart)
 	if err != nil {
 		return err
 	}
-	if !hasTok {
-		if err := r.DB.ResetSeen(ctx); err != nil {
-			return err
-		}
-		pageTok = ""
+	start := parseUint(anchor)
+	if !ok || start == 0 {
+		return fmt.Errorf("full catchup missing history anchor")
 	}
-	email, _, _ := r.DB.GetState(ctx, stateProfile)
+	return r.incremental(ctx, start)
+}
+
+func (r *Runner) list(ctx context.Context, markDeleted bool) error {
+	pageTok, _, err := r.DB.GetState(ctx, stateListPage)
+	if err != nil {
+		return err
+	}
 	r.progress("list")
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		ids, next, err := r.API.ListMessages(ctx, pageTok)
+		if errors.Is(err, gmail.ErrPageTokenExpired) {
+			prof, perr := r.API.Profile(ctx)
+			if perr != nil {
+				return perr
+			}
+			if err := r.restartFull(ctx, prof.HistoryID, markDeleted, false); err != nil {
+				return err
+			}
+			pageTok = ""
+			continue
+		}
 		if err != nil {
 			return err
 		}
-		write := context.WithoutCancel(ctx)
-		if err := r.DB.AddSeen(write, ids); err != nil {
-			return err
+		msgs, tombs, unresolved := r.fetchParsed(ctx, ids, "metadata")
+		if unresolved != nil {
+			return unresolved
 		}
-		if err := r.ingest(write, ids, "metadata", email); err != nil {
-			return err
-		}
+		write, cancel := persistContext()
+		p := store.PageCommit{Messages: msgs, Tombstones: tombs, Seen: ids}
 		if next != "" {
-			if err := r.DB.SetState(write, stateListPage, next); err != nil {
-				return err
-			}
-			pageTok = next
-			continue
-		}
-		if err := r.DB.ClearState(write, stateListPage); err != nil {
-			return err
-		}
-		if markDeleted {
-			n, err := r.DB.MarkMissingDeleted(write)
+			p.ListPage = store.StateValue(next)
+			err = r.DB.CommitSyncPage(write, p)
+			cancel()
 			if err != nil {
 				return err
 			}
-			r.logf("marked %d deleted", n)
-		} else {
-			_ = r.DB.ResetSeen(write)
+			r.noteWrite(len(msgs))
+			pageTok = next
+			continue
+		}
+		p.ListPage = store.StateClear()
+		p.MarkMissing = markDeleted
+		p.ResetSeen = !markDeleted
+		p.FullPhase = store.StateValue(phaseCatchup)
+		err = r.DB.CommitSyncPage(write, p)
+		cancel()
+		if err != nil {
+			return err
+		}
+		r.noteWrite(len(msgs))
+		if markDeleted {
+			r.logf("marked missing deleted")
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -229,11 +375,14 @@ func (r *Runner) incremental(ctx context.Context, start uint64) error {
 		return err
 	}
 	if s, ok, _ := r.DB.GetState(ctx, stateHistoryStart); ok {
-		if v, err := strconv.ParseUint(s, 10, 64); err == nil {
+		if v := parseUint(s); v > 0 {
 			start = v
 		}
 	}
-	email, _, _ := r.DB.GetState(ctx, stateProfile)
+	catchup := false
+	if phase, ok, _ := r.DB.GetState(ctx, stateFullPhase); ok && phase == phaseCatchup {
+		catchup = true
+	}
 	r.progress("history")
 	for {
 		if err := ctx.Err(); err != nil {
@@ -243,43 +392,63 @@ func (r *Runner) incremental(ctx context.Context, start uint64) error {
 		if err != nil {
 			return err
 		}
-		write := context.WithoutCancel(ctx)
-		if err := r.DB.MarkDeleted(write, page.Deleted); err != nil {
-			return err
-		}
 		need := append([]string{}, page.Added...)
 		for _, u := range page.LabelUpdates {
 			need = append(need, u.ID)
 		}
-		if err := r.ingest(write, unique(need), "metadata", email); err != nil {
-			return err
+		need = unique(need)
+		msgs, tombs, unresolved := r.fetchParsed(ctx, need, "metadata")
+		if unresolved != nil {
+			return unresolved
 		}
+		okIDs := map[string]struct{}{}
+		for _, m := range msgs {
+			okIDs[m.ID] = struct{}{}
+		}
+		for _, id := range unique(page.Deleted) {
+			if _, ok := okIDs[id]; !ok {
+				tombs = append(tombs, id)
+			}
+		}
+		write, cancel := persistContext()
+		p := store.PageCommit{Messages: msgs, Tombstones: unique(tombs)}
 		if page.NextPageToken != "" {
-			if err := r.DB.SetState(write, stateHistoryPage, page.NextPageToken); err != nil {
+			p.HistoryPage = store.StateValue(page.NextPageToken)
+			p.HistoryStart = store.StateValue(strconv.FormatUint(start, 10))
+			err = r.DB.CommitSyncPage(write, p)
+			cancel()
+			if err != nil {
 				return err
 			}
-			if err := r.DB.SetState(write, stateHistoryStart, strconv.FormatUint(start, 10)); err != nil {
-				return err
-			}
+			r.noteWrite(len(msgs))
 			pageTok = page.NextPageToken
 			continue
 		}
-		if page.HistoryID != 0 {
-			if err := r.DB.SetState(write, stateHistoryID, strconv.FormatUint(page.HistoryID, 10)); err != nil {
-				return err
-			}
+		if page.HistoryID == 0 {
+			cancel()
+			return fmt.Errorf("history page missing history id")
 		}
-		if err := r.DB.ClearState(write, stateHistoryPage); err != nil {
+		p.HistoryPage = store.StateClear()
+		p.HistoryStart = store.StateClear()
+		p.HistoryID = store.StateValue(strconv.FormatUint(page.HistoryID, 10))
+		if catchup {
+			p.FullPhase = store.StateClear()
+			p.FullStartID = store.StateClear()
+		}
+		err = r.DB.CommitSyncPage(write, p)
+		cancel()
+		if err != nil {
 			return err
 		}
-		if err := r.DB.ClearState(write, stateHistoryStart); err != nil {
+		r.noteWrite(len(msgs))
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		return nil
 	}
 }
 
-func (r *Runner) bodies(ctx context.Context, email string) error {
+func (r *Runner) bodies(ctx context.Context) error {
 	r.progress("bodies")
 	after := ""
 	var incomplete error
@@ -294,7 +463,7 @@ func (r *Runner) bodies(ctx context.Context, email string) error {
 		if len(ids) == 0 {
 			return incomplete
 		}
-		if err := r.ingest(ctx, ids, "full", email); err != nil {
+		if err := r.ingestBodies(ctx, ids); err != nil {
 			if errors.Is(err, errBodyIncomplete) {
 				incomplete = err
 			} else {
@@ -305,65 +474,145 @@ func (r *Runner) bodies(ctx context.Context, email string) error {
 	}
 }
 
-func (r *Runner) ingest(ctx context.Context, ids []string, format, email string) error {
+func (r *Runner) ingestBodies(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	raws, err := r.API.BatchGet(ctx, ids, format)
-	if err != nil {
+	updates, tombs, unresolved := r.fetchBodies(ctx, ids)
+	write, cancel := persistContext()
+	defer cancel()
+	if err := r.DB.ApplyBodyUpdates(write, updates, tombs); err != nil {
 		return err
 	}
-	full := format == "full"
-	want := make(map[string]struct{}, len(ids))
-	if full {
-		for _, id := range unique(ids) {
-			want[id] = struct{}{}
-		}
-	}
-	seen := make(map[string]struct{}, len(raws))
-	msgs := make([]store.Message, 0, len(raws))
-	for _, raw := range raws {
-		msg, err := parse.Message(raw, email)
-		if err != nil {
-			r.logf("skip parse: %v", err)
-			continue
-		}
-		if full {
-			if _, ok := want[msg.ID]; !ok {
-				continue
-			}
-			if _, ok := seen[msg.ID]; ok {
-				continue
-			}
-			msg.BodyFetched = true
-			msg.HasBody = msg.Body != ""
-		}
-		msgs = append(msgs, msg)
-		seen[msg.ID] = struct{}{}
-	}
-	writeCtx := ctx
-	if full {
-		var cancel context.CancelFunc
-		writeCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), persistBound)
-		defer cancel()
-	}
-	if err := r.DB.UpsertMessages(writeCtx, msgs); err != nil {
-		return err
-	}
-	if len(msgs) > 0 {
-		r.wrote = true
-		r.processed += len(msgs)
-		r.progress(r.phase)
-	}
-	r.logf("upserted %d %s messages", len(msgs), format)
-	if full {
-		for _, id := range ids {
-			if _, ok := seen[id]; !ok {
-				return fmt.Errorf("%w: missing or unparseable responses", errBodyIncomplete)
-			}
-		}
+	r.noteWrite(len(updates) + len(tombs))
+	r.logf("saved %d bodies", len(updates))
+	if unresolved != nil {
+		return unresolved
 	}
 	return nil
+}
+
+func (r *Runner) fetchBodies(ctx context.Context, ids []string) ([]store.BodyUpdate, []string, error) {
+	_, tombs, unresolved, updates := r.collectFetch(ctx, ids, "full")
+	return updates, tombs, unresolved
+}
+
+func (r *Runner) fetchParsed(ctx context.Context, ids []string, format string) ([]store.Message, []string, error) {
+	msgs, tombs, unresolved, _ := r.collectFetch(ctx, ids, format)
+	return msgs, tombs, unresolved
+}
+
+func (r *Runner) collectFetch(ctx context.Context, ids []string, format string) ([]store.Message, []string, error, []store.BodyUpdate) {
+	ids = unique(ids)
+	if len(ids) == 0 {
+		return nil, nil, nil, nil
+	}
+	results, fetchErr := r.API.BatchGet(ctx, ids, format)
+	full := format == "full"
+	if fetchErr != nil && !full {
+		return nil, nil, fetchErr, nil
+	}
+	want := map[string]struct{}{}
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+	seen := map[string]gmail.FetchResult{}
+	var unexpected error
+	for _, res := range results {
+		if res.ID == "" {
+			if full {
+				continue
+			}
+			unexpected = errors.Join(unexpected, fmt.Errorf("unexpected batch response"))
+			continue
+		}
+		if _, ok := want[res.ID]; !ok {
+			if !full {
+				unexpected = errors.Join(unexpected, fmt.Errorf("unexpected id %s", res.ID))
+			}
+			continue
+		}
+		if _, ok := seen[res.ID]; ok {
+			if !full {
+				unexpected = errors.Join(unexpected, fmt.Errorf("duplicate response for %s", res.ID))
+			}
+			continue
+		}
+		seen[res.ID] = res
+	}
+	var msgs []store.Message
+	var updates []store.BodyUpdate
+	var tombs []string
+	var unresolved error
+	if unexpected != nil && !full {
+		unresolved = unexpected
+	}
+	for _, id := range ids {
+		res, ok := seen[id]
+		if !ok {
+			if full {
+				unresolved = errors.Join(unresolved, errBodyIncomplete)
+			} else {
+				unresolved = errors.Join(unresolved, fmt.Errorf("%s: missing response", id))
+			}
+			continue
+		}
+		switch res.Status {
+		case gmail.FetchOK:
+			if err := gmail.MatchMessageID(res.Raw, id); err != nil {
+				unresolved = errors.Join(unresolved, err)
+				continue
+			}
+			msg, err := parse.Message(res.Raw)
+			if err != nil {
+				r.logf("skip parse: %v", err)
+				if full {
+					unresolved = errors.Join(unresolved, errBodyIncomplete, err)
+				} else {
+					unresolved = errors.Join(unresolved, err)
+				}
+				continue
+			}
+			if full {
+				updates = append(updates, store.BodyUpdate{ID: id, Body: msg.Body, Headers: msg.Headers})
+			} else {
+				msgs = append(msgs, msg)
+			}
+		case gmail.FetchNotFound:
+			tombs = append(tombs, id)
+		default:
+			cause := res.Err
+			if cause == nil {
+				cause = fmt.Errorf("%s: %s", id, res.Status)
+			}
+			if full {
+				unresolved = errors.Join(unresolved, errBodyIncomplete, cause)
+			} else {
+				unresolved = errors.Join(unresolved, cause)
+			}
+		}
+	}
+	if fetchErr != nil {
+		return msgs, tombs, errors.Join(unresolved, fetchErr), updates
+	}
+	return msgs, tombs, unresolved, updates
+}
+
+func knownPhase(phase string) bool {
+	return phase == phaseList || phase == phaseListFull || phase == phaseCatchup
+}
+
+func (r *Runner) noteWrite(n int) {
+	if n <= 0 {
+		return
+	}
+	r.processed += n
+	r.progress(r.phase)
+}
+
+func parseUint(s string) uint64 {
+	v, _ := strconv.ParseUint(s, 10, 64)
+	return v
 }
 
 func unique(ids []string) []string {

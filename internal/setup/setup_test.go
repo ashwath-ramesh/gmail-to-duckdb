@@ -15,6 +15,31 @@ import (
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/web"
 )
 
+func TestSetupStepsDocumentsOAuth(t *testing.T) {
+	text := strings.ToLower(SetupSteps)
+	for _, need := range []string{
+		"Google Cloud project",
+		"Gmail API",
+		"Desktop",
+		"gmail.readonly",
+		"External",
+		"internal",
+		"test user",
+		"https://support.google.com/cloud/answer/15549945?hl=en",
+		"seven days",
+		"own OAuth",
+	} {
+		if !strings.Contains(text, strings.ToLower(need)) {
+			t.Fatalf("SetupSteps missing %q", need)
+		}
+	}
+	var b strings.Builder
+	PrintSteps(&b)
+	if b.String() != SetupSteps {
+		t.Fatal("PrintSteps mismatch")
+	}
+}
+
 func TestInitAndDoctor(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -199,6 +224,15 @@ func TestDoctorAcceptsPrivateToken(t *testing.T) {
 		if c.Name == "token" {
 			if !c.OK {
 				t.Fatalf("private token failed: %+v", c)
+			}
+			detail := strings.ToLower(c.Detail)
+			for _, need := range []string{"local", "presence", "shape", "scope", "cannot prove", "refresh"} {
+				if !strings.Contains(detail, need) {
+					t.Fatalf("token detail missing %q: %s", need, c.Detail)
+				}
+			}
+			if strings.Contains(detail, "http") || strings.Contains(detail, "google.com") {
+				t.Fatalf("token check looks remote: %s", c.Detail)
 			}
 			return
 		}

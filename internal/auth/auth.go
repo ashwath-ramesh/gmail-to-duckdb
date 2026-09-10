@@ -30,6 +30,7 @@ import (
 const DefaultOAuthPort = 41807
 
 var errNeedLogin = errors.New("token unusable")
+var errInvalidGrant = errors.New("oauth refresh token rejected")
 
 func TokenPath(dbPath string) string {
 	ext := filepath.Ext(dbPath)
@@ -73,12 +74,33 @@ type persistSource struct {
 func (p *persistSource) Token() (*oauth2.Token, error) {
 	tok, err := p.src.Token()
 	if err != nil {
-		return nil, err
+		return nil, wrapRefreshError(err)
 	}
 	if err := saveToken(p.path, tok); err != nil {
 		return nil, err
 	}
 	return tok, nil
+}
+
+func wrapRefreshError(err error) error {
+	if !isInvalidGrant(err) {
+		return err
+	}
+	return fmt.Errorf("%w: stop serve, remove only the token file for this database, then run sync or sign in with the same account; do not delete the database or credentials", errInvalidGrant)
+}
+
+func isInvalidGrant(err error) bool {
+	var re *oauth2.RetrieveError
+	if !errors.As(err, &re) {
+		return false
+	}
+	if re.ErrorCode == "invalid_grant" {
+		return true
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	return json.Unmarshal(re.Body, &payload) == nil && payload.Error == "invalid_grant"
 }
 
 func loadToken(path string) (*oauth2.Token, error) {

@@ -23,7 +23,16 @@ import (
 
 const SetupSteps = `Create a Google Cloud project.
 Enable the Gmail API.
+Configure the OAuth consent screen.
+Use Internal consent only when the project is associated with an organization and only users in that organization sign in.
+Otherwise use External consent.
+If the app is External and in Testing, add yourself as a test user.
 Create OAuth 2.0 credentials for a Desktop app.
+The app requests the gmail.readonly scope.
+Use your own OAuth client. Do not copy another person's credentials.json.
+External apps in Testing expire refresh tokens after seven days.
+Google Workspace admins can block or restrict access.
+See https://support.google.com/cloud/answer/15549945?hl=en
 Save the JSON file, then run:
   gmail-to-duckdb init --credentials PATH
 `
@@ -205,7 +214,7 @@ func checkToken(path string) query.Check {
 		return c
 	}
 	c.OK = true
-	c.Detail = path
+	c.Detail = path + " (local check only: presence, shape, and scope; cannot prove Google will refresh this token)"
 	return c
 }
 

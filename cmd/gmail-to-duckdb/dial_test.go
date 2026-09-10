@@ -46,7 +46,7 @@ func TestCLIDialsServe(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
-	if env.SchemaVersion != 2 {
+	if env.SchemaVersion != 3 {
 		t.Fatalf("%s", out.String())
 	}
 	if env.UntrustedContent {

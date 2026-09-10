@@ -42,7 +42,7 @@ func TestStatusEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env.SchemaVersion != 2 {
+	if env.SchemaVersion != 3 {
 		t.Fatalf("schema %d", env.SchemaVersion)
 	}
 	if env.BodyCoverage.SearchCovers != "metadata" {
@@ -104,8 +104,11 @@ func TestSchemaAndSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env.Schema == nil || env.Schema.Version != 2 || len(env.Schema.Tables) < 3 {
+	if env.Schema == nil || env.Schema.Version != 3 || len(env.Schema.Tables) < 3 {
 		t.Fatalf("%+v", env.Schema)
+	}
+	if !schemaHasCol(env.Schema.Tables, "messages", "headers") {
+		t.Fatalf("schema missing headers type: %+v", env.Schema.Tables)
 	}
 	if env.UntrustedContent {
 		t.Fatal("schema should not mark untrusted")
@@ -215,4 +218,44 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func schemaHasCol(tables []store.TableSchema, table, col string) bool {
+	for _, t := range tables {
+		if t.Name != table {
+			continue
+		}
+		for _, c := range t.Columns {
+			if c.Name == col && c.Type != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestListAndGetJSONOmitHeaders(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	at := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	if err := db.UpsertMessages(ctx, []store.Message{{
+		ID: "m1", ThreadID: "t1", InternalDate: at, FromEmail: "a@x.com", Subject: "hi",
+		Headers: []store.Header{{Name: "From", Value: "a@x.com"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := Search(ctx, db, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(mustJSON(t, list.Messages), `"headers"`) {
+		t.Fatalf("list exposed headers: %s", mustJSON(t, list.Messages))
+	}
+	got, err := Get(ctx, db, "m1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(mustJSON(t, got.Message), `"headers"`) {
+		t.Fatalf("get exposed headers: %s", mustJSON(t, got.Message))
+	}
 }

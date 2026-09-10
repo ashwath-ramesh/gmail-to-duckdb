@@ -17,25 +17,35 @@ import (
 )
 
 type fakeAPI struct {
-	profile      gmail.Profile
-	labels       []store.Label
-	listPages    [][]string
-	listCalls    int
-	afterList    func()
-	historyPages []gmail.HistoryPage
-	historyErr   error
-	historyCalls int
-	raw          map[string][]byte
-	fullRaw      map[string][]byte
-	fullErr      error
-	failAfter    int
-	maxFull      int
-	fullBatches  int
-	blockFull    bool
-	enteredFull  chan struct{}
-	releaseFull  chan struct{}
-	extraFull    [][]byte
-	gets         []string
+	profile       gmail.Profile
+	labels        []store.Label
+	listPages     [][]string
+	listCalls     int
+	afterList     func()
+	historyPages  []gmail.HistoryPage
+	historyErr    error
+	historyCalls  int
+	raw           map[string][]byte
+	fullRaw       map[string][]byte
+	fullErr       error
+	failAfter     int
+	maxFull       int
+	fullBatches   int
+	blockFull     bool
+	enteredFull   chan struct{}
+	releaseFull   chan struct{}
+	extraFull     [][]byte
+	gets          []string
+	notFound      map[string]bool
+	status        map[string]gmail.FetchStatus
+	expireToken   string
+	listTokens    []string
+	historyStarts []uint64
+	resultErr     map[string]error
+	batchWithErr  error
+	afterHistory  func()
+	afterGet      func()
+	afterBatch    func()
 }
 
 func (f *fakeAPI) Profile(context.Context) (gmail.Profile, error) { return f.profile, nil }
@@ -45,10 +55,17 @@ func (f *fakeAPI) ListMessages(ctx context.Context, pageToken string) ([]string,
 	if ctx.Err() != nil {
 		return nil, "", ctx.Err()
 	}
-	i := f.listCalls
+	f.listTokens = append(f.listTokens, pageToken)
 	f.listCalls++
 	if f.afterList != nil {
 		f.afterList()
+	}
+	if pageToken == "expired" || pageToken == "stale" || (f.expireToken != "" && pageToken == f.expireToken) {
+		return nil, "", gmail.ErrPageTokenExpired
+	}
+	i := 0
+	if len(pageToken) >= 2 && pageToken[0] == 'p' {
+		i = int(pageToken[1] - '0')
 	}
 	if i >= len(f.listPages) {
 		return nil, "", nil
@@ -61,18 +78,29 @@ func (f *fakeAPI) ListMessages(ctx context.Context, pageToken string) ([]string,
 }
 
 func (f *fakeAPI) History(ctx context.Context, startID uint64, pageToken string) (gmail.HistoryPage, error) {
+	f.historyStarts = append(f.historyStarts, startID)
 	if f.historyErr != nil {
-		return gmail.HistoryPage{}, f.historyErr
+		err := f.historyErr
+		f.historyErr = nil
+		return gmail.HistoryPage{}, err
 	}
 	i := f.historyCalls
 	f.historyCalls++
 	if i >= len(f.historyPages) {
-		return gmail.HistoryPage{HistoryID: startID}, nil
+		page := gmail.HistoryPage{HistoryID: startID}
+		if f.afterHistory != nil {
+			f.afterHistory()
+		}
+		return page, nil
 	}
-	return f.historyPages[i], nil
+	page := f.historyPages[i]
+	if f.afterHistory != nil {
+		f.afterHistory()
+	}
+	return page, nil
 }
 
-func (f *fakeAPI) BatchGet(ctx context.Context, ids []string, format string) ([][]byte, error) {
+func (f *fakeAPI) BatchGet(ctx context.Context, ids []string, format string) ([]gmail.FetchResult, error) {
 	if format == "full" {
 		f.signalFullEntered()
 		if f.blockFull {
@@ -95,15 +123,35 @@ func (f *fakeAPI) BatchGet(ctx context.Context, ids []string, format string) ([]
 	if format == "full" && f.fullRaw != nil {
 		src = f.fullRaw
 	}
-	var out [][]byte
+	var out []gmail.FetchResult
 	for _, id := range ids {
 		f.gets = append(f.gets, format+":"+id)
+		if f.notFound[id] {
+			out = append(out, gmail.FetchResult{ID: id, Status: gmail.FetchNotFound})
+			continue
+		}
+		if st, ok := f.status[id]; ok {
+			cause := f.resultErr[id]
+			if cause == nil {
+				cause = errors.New(st.String())
+			}
+			out = append(out, gmail.FetchResult{ID: id, Status: st, Err: cause})
+			continue
+		}
 		if b, ok := src[id]; ok {
-			out = append(out, b)
+			out = append(out, gmail.FetchResult{ID: id, Status: gmail.FetchOK, Raw: b})
 		}
 	}
 	if format == "full" && len(f.extraFull) > 0 {
-		out = append(out, f.extraFull...)
+		for _, b := range f.extraFull {
+			out = append(out, gmail.FetchResult{ID: jsonID(b), Status: gmail.FetchOK, Raw: b})
+		}
+	}
+	if format == "full" && f.afterBatch != nil {
+		f.afterBatch()
+	}
+	if f.batchWithErr != nil {
+		return out, f.batchWithErr
 	}
 	return out, nil
 }
@@ -119,16 +167,32 @@ func (f *fakeAPI) signalFullEntered() {
 	}
 }
 
-func (f *fakeAPI) Get(_ context.Context, id, format string) ([]byte, error) {
+func (f *fakeAPI) Get(_ context.Context, id, format string) (gmail.FetchResult, error) {
+	f.gets = append(f.gets, format+":"+id)
 	src := f.raw
 	if format == "full" && f.fullRaw != nil {
 		src = f.fullRaw
 	}
+	if f.notFound[id] {
+		return gmail.FetchResult{ID: id, Status: gmail.FetchNotFound}, nil
+	}
 	b, ok := src[id]
 	if !ok {
-		return nil, errors.New("missing " + id)
+		return gmail.FetchResult{ID: id, Status: gmail.FetchFatal, Err: errors.New("missing " + id)}, errors.New("missing " + id)
 	}
-	return b, nil
+	res := gmail.FetchResult{ID: id, Status: gmail.FetchOK, Raw: b}
+	if f.afterGet != nil {
+		f.afterGet()
+	}
+	return res, nil
+}
+
+func jsonID(raw []byte) string {
+	var m struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(raw, &m)
+	return m.ID
 }
 
 func itoa(n int) string { return string(rune('0' + n)) }
@@ -195,6 +259,9 @@ func openTest(t *testing.T) (*store.DB, *Runner, *fakeAPI) {
 		raw:     map[string][]byte{},
 	}
 	r := &Runner{DB: db, API: api, Log: func(string, ...any) {}}
+	if err := db.SetState(context.Background(), store.StateProfileEmail, api.profile.Email); err != nil {
+		t.Fatal(err)
+	}
 	return db, r, api
 }
 

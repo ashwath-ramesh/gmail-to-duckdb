@@ -130,11 +130,11 @@ func TestIDsNeedingFetchKeyset(t *testing.T) {
 	}
 }
 
-func TestFreshOpenIsSchema2WithBodyFetched(t *testing.T) {
+func TestFreshOpenIsSchema3WithHeaders(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	v, ok, err := db.GetState(ctx, StateSchemaVersion)
-	if err != nil || !ok || v != "2" {
+	if err != nil || !ok || v != "3" {
 		t.Fatalf("fresh schema version %q %v %v", v, ok, err)
 	}
 	tables, err := db.DescribeSchema(ctx)
@@ -143,6 +143,9 @@ func TestFreshOpenIsSchema2WithBodyFetched(t *testing.T) {
 	}
 	if !schemaHasColumn(tables, "messages", "body_fetched") {
 		t.Fatalf("fresh schema missing body_fetched: %#v", tables)
+	}
+	if !schemaHasColumn(tables, "messages", "headers") {
+		t.Fatalf("fresh schema missing headers: %#v", tables)
 	}
 }
 
@@ -247,7 +250,7 @@ func assertMigratedV1(t *testing.T, db *DB) {
 	t.Helper()
 	ctx := context.Background()
 	v, ok, err := db.GetState(ctx, StateSchemaVersion)
-	if err != nil || !ok || v != "2" {
+	if err != nil || !ok || v != "3" {
 		t.Fatalf("migrated version %q %v %v", v, ok, err)
 	}
 	hid, ok, err := db.GetState(ctx, "history_id")
@@ -267,8 +270,11 @@ func assertMigratedV1(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if legacy.HasBody || !legacy.BodyFetched || legacy.Body != "" {
-		t.Fatalf("legacy empty has_body must become fetched-only: %+v", legacy)
+	if legacy.HasBody || legacy.BodyFetched || legacy.Body != "" {
+		t.Fatalf("legacy empty fetched body must requeue once: %+v", legacy)
+	}
+	if legacy.Headers != nil {
+		t.Fatalf("migrated headers must stay NULL: %#v", legacy.Headers)
 	}
 
 	pending, err := db.GetMessage(ctx, "pending")
@@ -285,6 +291,10 @@ func assertMigratedV1(t *testing.T, db *DB) {
 	}
 	if c.Total != 3 || c.WithBody != 1 || c.SearchCovers() != "mixed" {
 		t.Fatalf("coverage after migrate: %+v", c)
+	}
+	dirty, ok, err := db.GetState(ctx, stateFTSDirty)
+	if err != nil || !ok || dirty != ftsDirtyValue {
+		t.Fatalf("v1 migrate must mark fts dirty %q %v %v", dirty, ok, err)
 	}
 }
 

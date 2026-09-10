@@ -3,6 +3,7 @@ package parse
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/mail"
 	"strconv"
 	"strings"
@@ -10,6 +11,10 @@ import (
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 )
+
+var errEmptyID = fmt.Errorf("empty message id")
+var errMissingText = fmt.Errorf("missing referenced text body")
+var errBodyDecode = fmt.Errorf("invalid message body encoding")
 
 type gmailMessage struct {
 	ID           string   `json:"id"`
@@ -23,26 +28,26 @@ type gmailMessage struct {
 }
 
 type payload struct {
-	MimeType string    `json:"mimeType"`
-	Headers  []header  `json:"headers"`
-	Body     *body     `json:"body"`
-	Parts    []payload `json:"parts"`
-}
-
-type header struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
+	MimeType string         `json:"mimeType"`
+	Filename string         `json:"filename"`
+	Headers  []store.Header `json:"headers"`
+	Body     *body          `json:"body"`
+	Parts    []payload      `json:"parts"`
 }
 
 type body struct {
-	Data string `json:"data"`
-	Size int    `json:"size"`
+	Data         string `json:"data"`
+	Size         int    `json:"size"`
+	AttachmentID string `json:"attachmentId"`
 }
 
-func Message(raw []byte, profileEmail string) (store.Message, error) {
+func Message(raw []byte) (store.Message, error) {
 	var g gmailMessage
 	if err := json.Unmarshal(raw, &g); err != nil {
 		return store.Message{}, err
+	}
+	if g.ID == "" {
+		return store.Message{}, errEmptyID
 	}
 	msg := store.Message{
 		ID:        g.ID,
@@ -51,6 +56,7 @@ func Message(raw []byte, profileEmail string) (store.Message, error) {
 		SizeBytes: g.SizeEstimate,
 		LabelIDs:  g.LabelIDs,
 		SyncedAt:  time.Now().UTC(),
+		Headers:   []store.Header{},
 	}
 	if g.LabelIDs == nil {
 		msg.LabelIDs = []string{}
@@ -62,18 +68,23 @@ func Message(raw []byte, profileEmail string) (store.Message, error) {
 		msg.InternalDate = time.UnixMilli(ms).UTC()
 	}
 	msg.IsRead = !hasLabel(g.LabelIDs, "UNREAD")
+	msg.IsOutgoing = hasLabel(g.LabelIDs, "SENT")
 	if g.Payload != nil {
+		if g.Payload.Headers != nil {
+			msg.Headers = append([]store.Header{}, g.Payload.Headers...)
+		}
 		hdrs := headerMap(g.Payload.Headers)
 		msg.FromName, msg.FromEmail = ParseMailbox(hdrs["from"])
 		msg.ToEmails = ParseAddressList(hdrs["to"])
 		msg.CcEmails = ParseAddressList(hdrs["cc"])
 		msg.Subject = hdrs["subject"]
-		if body, ok := extractPlain(g.Payload); ok {
-			msg.Body = body
-			msg.HasBody = true
+		body, err := extractBody(g.Payload)
+		if err != nil {
+			return store.Message{}, err
 		}
+		msg.Body = body
+		msg.HasBody = body != ""
 	}
-	msg.IsOutgoing = profileEmail != "" && strings.EqualFold(msg.FromEmail, profileEmail)
 	return msg, nil
 }
 
@@ -109,7 +120,7 @@ func ParseAddressList(s string) []string {
 	return out
 }
 
-func headerMap(hs []header) map[string]string {
+func headerMap(hs []store.Header) map[string]string {
 	out := map[string]string{}
 	for _, h := range hs {
 		key := strings.ToLower(h.Name)
@@ -120,26 +131,80 @@ func headerMap(hs []header) map[string]string {
 	return out
 }
 
-func extractPlain(p *payload) (string, bool) {
-	if p == nil {
-		return "", false
+func extractBody(p *payload) (string, error) {
+	plain, err := findText(p, "text/plain")
+	if err != nil {
+		return "", err
 	}
-	if strings.EqualFold(p.MimeType, "text/plain") && p.Body != nil && p.Body.Data != "" {
-		if s, err := decodeBody(p.Body.Data); err == nil {
-			return s, true
+	if plain != "" {
+		return plain, nil
+	}
+	return findText(p, "text/html")
+}
+
+func findText(p *payload, mime string) (string, error) {
+	if p == nil || isAttachment(p) {
+		return "", nil
+	}
+	if strings.EqualFold(p.MimeType, mime) {
+		text, err := partText(p)
+		if err != nil || text != "" {
+			return text, err
 		}
 	}
 	for i := range p.Parts {
-		if s, ok := extractPlain(&p.Parts[i]); ok {
-			return s, true
+		text, err := findText(&p.Parts[i], mime)
+		if err != nil || text != "" {
+			return text, err
 		}
 	}
-	if strings.EqualFold(p.MimeType, "text/html") && p.Body != nil && p.Body.Data != "" {
-		if s, err := decodeBody(p.Body.Data); err == nil {
-			return s, true
+	return "", nil
+}
+
+func partText(p *payload) (string, error) {
+	if p.Body == nil {
+		return "", nil
+	}
+	if p.Body.Data != "" {
+		s, err := decodeBody(p.Body.Data)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", errBodyDecode, err)
+		}
+		return s, nil
+	}
+	if p.Body.AttachmentID != "" || p.Body.Size > 0 {
+		return "", errMissingText
+	}
+	return "", nil
+}
+
+func isAttachment(p *payload) bool {
+	if strings.EqualFold(p.MimeType, "message/rfc822") {
+		return true
+	}
+	if p.Filename != "" {
+		return true
+	}
+	if disp := headerValue(p.Headers, "content-disposition"); strings.Contains(strings.ToLower(disp), "attachment") {
+		return true
+	}
+	if p.Body != nil && p.Body.AttachmentID != "" && !isTextMIME(p.MimeType) {
+		return true
+	}
+	return false
+}
+
+func isTextMIME(mt string) bool {
+	return strings.EqualFold(mt, "text/plain") || strings.EqualFold(mt, "text/html")
+}
+
+func headerValue(hs []store.Header, name string) string {
+	for _, h := range hs {
+		if strings.EqualFold(h.Name, name) {
+			return h.Value
 		}
 	}
-	return "", false
+	return ""
 }
 
 func decodeBody(data string) (string, error) {

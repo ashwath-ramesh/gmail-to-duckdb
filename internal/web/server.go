@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/search"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/stats"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	mailsync "github.com/ashwath-ramesh/gmail-to-duckdb/internal/sync"
@@ -24,7 +25,7 @@ import (
 type Server struct {
 	DB           *store.DB
 	Token        string
-	FetchBody    func(ctx context.Context, id string) (string, error)
+	FetchBody    func(ctx context.Context, id string) error
 	Sync         func(ctx context.Context, opt mailsync.Options) error
 	SyncCtx      context.Context
 	AllowDuckUI  bool
@@ -174,7 +175,11 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	}
 	msgs, err := s.DB.ListMessages(r.Context(), f)
 	if err != nil {
-		writeErr(w, err, http.StatusInternalServerError)
+		code := http.StatusInternalServerError
+		if search.IsValidation(err) {
+			code = http.StatusBadRequest
+		}
+		writeErr(w, err, code)
 		return
 	}
 	env, err := query.Status(r.Context(), s.DB)
@@ -293,13 +298,12 @@ func (s *Server) body(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, http.StatusNotFound)
 		return
 	}
-	body, err := s.FetchBody(r.Context(), id)
-	if err != nil {
-		writeErr(w, err, http.StatusBadGateway)
-		return
-	}
-	if err := s.DB.UpdateBody(r.Context(), id, body); err != nil {
-		writeErr(w, err, http.StatusInternalServerError)
+	if err := s.FetchBody(r.Context(), id); err != nil {
+		code := http.StatusBadGateway
+		if errors.Is(err, mailsync.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeErr(w, err, code)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})

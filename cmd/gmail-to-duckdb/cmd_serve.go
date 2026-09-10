@@ -12,7 +12,6 @@ import (
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/config"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/gmail"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/openurl"
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/parse"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	mailsync "github.com/ashwath-ramesh/gmail-to-duckdb/internal/sync"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/web"
@@ -54,16 +53,8 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	s := &web.Server{DB: db, Token: tok, SyncCtx: ctx, AllowDuckUI: *duckUI}
 	if hc, err := auth.HTTPClient(ctx, *cf.creds, auth.TokenPath(*cf.db), *cf.oauthPort); err == nil {
 		if api, err := gmail.New(ctx, hc); err == nil {
-			s.FetchBody = func(ctx context.Context, id string) (string, error) {
-				raw, err := api.Get(ctx, id, "full")
-				if err != nil {
-					return "", err
-				}
-				msg, err := parse.Message(raw, "")
-				if err != nil {
-					return "", err
-				}
-				return msg.Body, nil
+			s.FetchBody = func(ctx context.Context, id string) error {
+				return mailsync.FetchOnDemand(ctx, db, api, id)
 			}
 			s.Sync = func(ctx context.Context, opt mailsync.Options) error {
 				r := &mailsync.Runner{
