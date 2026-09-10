@@ -1,0 +1,11 @@
+Generated using the built-in image_gen tool.
+
+Use case: illustration-story
+Asset type: wide GitHub README banner, approximately 3:1 landscape.
+Primary request: a memorable little yellow postal duck delivering envelopes into a laptop, illustrated as polished playful retro pixel art.
+Scene/backdrop: simple warm ivory background with plenty of empty space; one small centered scene.
+Subject: a charming yellow duck wearing a tiny brown postal satchel stands beside an open charcoal laptop, feeding a cream envelope through a mail slot in its side. Another envelope is held in the duck's orange beak. On the laptop screen the mail becomes neat rows of a database table, represented by simple colored pixels and horizontal lines with no readable text. A couple of cream envelopes peek out of the satchel.
+Style/medium: crisp intentional pixel art, limited palette, clean pixel clusters, restrained shading, nostalgic small retro game scene. Strong recognizable silhouette, adorable but understated.
+Composition/framing: wide shallow banner, duck and laptop form a single compact scene centered horizontally, both completely visible, generous quiet margins. Small subtle pixel ground shadow only.
+Color palette: warm yellow duck, orange beak and feet, cream envelopes with a few red accents, dark charcoal laptop, warm ivory background.
+Constraints: no text anywhere, no caption, no lettering, no title, no logos, no watermark, no border, no extraneous scenery.

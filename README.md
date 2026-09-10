@@ -1,5 +1,7 @@
 # Gmail to DuckDB
 
+![A yellow postal duck delivering envelopes into a laptop showing database rows.](docs/assets/postal-duck.png)
+
 Inspired by: https://github.com/marcboeker/gmail-to-sqlite
 
 A local CLI that syncs Gmail into a DuckDB file on your machine.
