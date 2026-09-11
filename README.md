@@ -15,8 +15,9 @@ Browse mail in the local UI. Agents and scripts use the `--json` commands.
 ## Stack
 
 - One Go binary
-- One DuckDB file
-- DuckDB FTS across people, subject, snippet, and body
+- One DuckDB mailbox
+- A disposable local SQLite trigram index (`*.duckdb.search`) for candidate selection
+- DuckDB remains the authority for verify and literal search
 - Gmail History API and batch get
 - Metadata first. Bodies when you ask.
 
@@ -135,13 +136,15 @@ Mail lists metadata. Open a message and use Fetch body to pull one body from Gma
 
 Spam and Trash are included. Permanent deletions stay in the local file with `is_deleted`. Ordinary search and reports exclude those rows.
 
-`fts` false means the full-text index is pending or unavailable. Literal search still works.
+`fts` is true only when the local search index is fully current. `search_index_state` reports `ready`, `pending`, `building`, `repair`, `disabled`, or `unavailable`. Literal search still works while the index is not ready.
 
 SQL defaults and write guards are in [docs/security.md](docs/security.md).
 
 ## Search
 
-Search uses case-insensitive literal substrings. All terms are AND. Quoted phrases are literal contiguous text. Quoted filter values work: `subject:"payment received"`. `%` and `_` are literal. Full-text ranking only. Membership does not use stemming. Order falls back to date, then id.
+Search uses case-insensitive literal substrings. All terms are AND. Quoted phrases are literal contiguous text. Quoted filter values work: `subject:"payment received"`. `%` and `_` are literal. Membership does not use stemming. Results are newest first (`internal_date DESC`, then `id DESC`).
+
+A disposable local SQLite trigram index (`*.duckdb.search`) selects candidates. DuckDB verifies every hit. Measured numbers, invariants, and reproduce steps are in [docs/performance.md](docs/performance.md). Index contents and file rules are in [docs/security.md](docs/security.md).
 
 Supported operators:
 
@@ -176,6 +179,8 @@ Every `--json` command prints the same envelope:
 
 - `schema_version`
 - `last_sync`
+- `status_as_of`
+- `search_index_state`
 - `body_coverage` (`with_body`, `total`, `search_covers`)
 - `result_count`, `truncated`
 - `untrusted_content`
@@ -194,14 +199,17 @@ Human CLI output escapes terminal controls, bidi overrides and isolates, and inv
 
 ## Schema
 
-`schema_version` is `3`.
+`schema_version` is `4`. Open migrates supported older versions automatically. A v0.2 binary rejects schema 4.
 
-`messages` stores typed columns: ids, timestamps, from, to, cc, subject, snippet, nullable body, labels, read/outgoing/deleted flags, `has_body`, `body_fetched`, and `search_text` for one-box search.
+`messages` stores typed columns: ids, timestamps, from, to, cc, subject, snippet, nullable body, labels, read/outgoing/deleted flags, `has_body`, `body_fetched`, `search_text`, and `search_revision` for one-box search.
 
 - `has_body` is true only when the stored body is nonempty.
 - `body_fetched` is true after a successful full fetch or on-demand body write, even when the body is empty.
 - The SENT label determines outgoing.
 - Upgrading to v3 requeues legacy fetched-empty bodies once. Only an explicit body request fetches them.
+- Upgrading to v4 adds `search_revision` and search freshness metadata. It does not rewrite every `search_text` row. A legacy mailbox with existing rows is marked repair. A new empty v4 mailbox is not. Background repair fills cached text. The process does not download a DuckDB FTS extension.
+- Roll back from v4 by restoring a pre-upgrade DuckDB backup.
+- After an upgrade, restart any old running `serve` process. `/api/health` and the rest of that process keep the old binary until you restart.
 
 `headers` is a nullable ordered JSON array. Ordinary message result lists omit it. `sql` returns the header values. `schema` describes the column type and does not return header values. The array keeps every Gmail top-level header name, value, order, and duplicate. `NULL` means headers are not yet collected. An old message may already be fetched. `[]` means a fetch found no headers.
 
@@ -213,7 +221,8 @@ The v3 migration is local. It does not call the network. Run `sync --full` to ba
 
 ## Privacy
 
-- Mail is written only to the local DuckDB file. The file is plaintext. Owner-only permissions are not encryption.
+- Mail bodies and metadata live in the local DuckDB file. A derived search index lives beside it. Both are plaintext. Owner-only permissions are not encryption.
 - The HTTP UI listens on loopback.
-- Keep `credentials.json`, `*.token.json`, `*.serve.json`, and `*.duckdb` out of git.
-- See [docs/security.md](docs/security.md) for OAuth, private files, SQL restrictions, FTS extension downloads, and database path rules.
+- Keep `credentials.json`, `*.token.json`, `*.serve.json`, `*.duckdb`, and `*.duckdb.search` out of git.
+- `/api/status` serves a cached envelope (`status_as_of`). A background refresher updates it. Search list uses that cached base.
+- See [docs/security.md](docs/security.md) for OAuth, private files, SQL restrictions, the local search index, and database path rules.

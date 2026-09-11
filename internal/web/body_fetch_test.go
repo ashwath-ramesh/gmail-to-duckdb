@@ -66,6 +66,7 @@ func TestGetAndOnDemandBodyFlags(t *testing.T) {
 		t.Fatalf("filled %#v", filled)
 	}
 
+	seedStatus(t, s)
 	st := req(t, h, http.MethodGet, "/api/status")
 	var env query.Envelope
 	if err := json.Unmarshal(st.Body.Bytes(), &env); err != nil {

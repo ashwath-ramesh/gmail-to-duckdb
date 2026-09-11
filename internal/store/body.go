@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -19,29 +20,18 @@ func (d *DB) ApplyBodyUpdates(ctx context.Context, updates []BodyUpdate, tombs [
 	if len(updates) == 0 && len(tombs) == 0 {
 		return nil
 	}
-	if err := d.acquire(ctx); err != nil {
-		return err
-	}
-	defer d.release()
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := markFTSDirty(ctx, tx); err != nil {
-		return err
-	}
-	ids := make([]string, 0, len(updates))
-	now := time.Now().UTC()
-	for _, u := range updates {
-		if u.ID == "" {
-			continue
-		}
-		var headers any
-		if u.Headers != nil {
-			headers = encodeHeaders(u.Headers)
-		}
-		res, err := tx.ExecContext(ctx, `
+	err := d.withTx(ctx, func(tx *sql.Tx) error {
+		ids := make([]string, 0, len(updates))
+		now := time.Now().UTC()
+		for _, u := range updates {
+			if u.ID == "" {
+				continue
+			}
+			var headers any
+			if u.Headers != nil {
+				headers = encodeHeaders(u.Headers)
+			}
+			res, err := tx.ExecContext(ctx, `
 UPDATE messages SET
   body = ?,
   has_body = (? <> ''),
@@ -50,21 +40,23 @@ UPDATE messages SET
   synced_at = ?
 WHERE id = ? AND NOT COALESCE(body_fetched, false)
 `, u.Body, u.Body, headers, now, u.ID)
-		if err != nil {
+			if err != nil {
+				return err
+			}
+			n, _ := res.RowsAffected()
+			if n > 0 {
+				ids = append(ids, u.ID)
+			}
+		}
+		if err := markDeletedTx(ctx, tx, tombs); err != nil {
 			return err
 		}
-		n, _ := res.RowsAffected()
-		if n > 0 {
-			ids = append(ids, u.ID)
-		}
+		return touchSearchTx(ctx, tx, ids)
+	})
+	if err == nil {
+		d.notifyIndex()
 	}
-	if err := markDeletedTx(ctx, tx, tombs); err != nil {
-		return err
-	}
-	if err := refreshSearchTextTx(ctx, tx, ids); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return err
 }
 
 func (d *DB) IDsNeedingFetch(ctx context.Context, afterID string, limit int) ([]string, error) {

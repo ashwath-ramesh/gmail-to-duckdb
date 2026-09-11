@@ -26,43 +26,94 @@ func (d *DB) QuerySQL(ctx context.Context, query string, allowWrite bool) (SQLRe
 		return SQLResult{}, err
 	}
 	if allowWrite {
-		if err := d.acquire(ctx); err != nil {
-			return SQLResult{}, err
-		}
-		defer d.release()
-		if err := markFTSDirty(ctx, d.sql); err != nil {
-			return SQLResult{}, err
-		}
+		return d.querySQLWrite(ctx, query)
 	}
+	return d.querySQLRead(ctx, query)
+}
+
+func (d *DB) querySQLRead(ctx context.Context, query string) (SQLResult, error) {
 	c, err := d.sql.Conn(ctx)
 	if err != nil {
 		return SQLResult{}, err
 	}
 	defer c.Close()
-
-	var ro bool
-	if !allowWrite {
-		if _, err := c.ExecContext(ctx, "BEGIN TRANSACTION READ ONLY"); err != nil {
-			return SQLResult{}, err
-		}
-		ro = true
+	if _, err := c.ExecContext(ctx, "BEGIN TRANSACTION READ ONLY"); err != nil {
+		return SQLResult{}, err
 	}
 	defer func() {
-		if !ro {
-			return
-		}
 		if err := rollbackConn(c); err != nil {
 			discardConn(c)
 		}
 	}()
-
-	if err := inspectUserSQL(c, query, allowWrite); err != nil {
+	if _, err := inspectUserSQL(c, query, false); err != nil {
 		return SQLResult{}, err
 	}
+	return querySQLConn(ctx, c, query)
+}
+
+func (d *DB) querySQLWrite(ctx context.Context, query string) (SQLResult, error) {
+	if err := d.acquire(ctx); err != nil {
+		return SQLResult{}, err
+	}
+	defer d.release()
+	c, err := d.reserved(ctx, &d.writer)
+	if err != nil {
+		return SQLResult{}, err
+	}
+	tx, err := c.BeginTx(ctx, nil)
+	if err != nil {
+		if deadConn(err) {
+			d.dropReserved(&d.writer)
+			c, err = d.reserved(ctx, &d.writer)
+			if err != nil {
+				return SQLResult{}, err
+			}
+			tx, err = c.BeginTx(ctx, nil)
+		}
+		if err != nil {
+			return SQLResult{}, err
+		}
+	}
+	defer func() { _ = tx.Rollback() }()
+	kind, err := inspectUserSQL(c, query, true)
+	if err != nil {
+		return SQLResult{}, err
+	}
+	res, err := querySQLTx(ctx, tx, query)
+	if err != nil {
+		return SQLResult{}, err
+	}
+	if writeStmt(kind) {
+		if err := invalidateSearchTx(ctx, tx); err != nil {
+			return SQLResult{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return SQLResult{}, err
+	}
+	if writeStmt(kind) {
+		d.notifyIndex()
+	}
+	return res, nil
+}
+
+func querySQLConn(ctx context.Context, c *sql.Conn, query string) (SQLResult, error) {
 	rows, err := c.QueryContext(ctx, query)
 	if err != nil {
 		return SQLResult{}, err
 	}
+	return finishSQLRows(rows)
+}
+
+func querySQLTx(ctx context.Context, tx *sql.Tx, query string) (SQLResult, error) {
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil {
+		return SQLResult{}, err
+	}
+	return finishSQLRows(rows)
+}
+
+func finishSQLRows(rows *sql.Rows) (SQLResult, error) {
 	res, err := scanSQLResult(rows)
 	closeErr := rows.Close()
 	if err != nil {
@@ -72,6 +123,17 @@ func (d *DB) QuerySQL(ctx context.Context, query string, allowWrite bool) (SQLRe
 		return SQLResult{}, closeErr
 	}
 	return res, rows.Err()
+}
+
+func writeStmt(kind duckdb.StmtType) bool {
+	switch kind {
+	case duckdb.STATEMENT_TYPE_INSERT, duckdb.STATEMENT_TYPE_UPDATE, duckdb.STATEMENT_TYPE_DELETE,
+		duckdb.STATEMENT_TYPE_CREATE, duckdb.STATEMENT_TYPE_ALTER, duckdb.STATEMENT_TYPE_DROP,
+		duckdb.STATEMENT_TYPE_EXPLAIN:
+		return true
+	default:
+		return false
+	}
 }
 
 func rejectSQLText(query string) error {
@@ -86,8 +148,9 @@ func rejectSQLText(query string) error {
 
 // inspectUserSQL uses native Prepare. Prepare must not execute the statement
 // or any prefix. Statement type is the allow-list input.
-func inspectUserSQL(c *sql.Conn, query string, allowWrite bool) error {
-	return c.Raw(func(dc any) error {
+func inspectUserSQL(c *sql.Conn, query string, allowWrite bool) (duckdb.StmtType, error) {
+	var kind duckdb.StmtType
+	err := c.Raw(func(dc any) error {
 		conn, ok := dc.(*duckdb.Conn)
 		if !ok {
 			return fmt.Errorf("unexpected connection type")
@@ -101,16 +164,18 @@ func inspectUserSQL(c *sql.Conn, query string, allowWrite bool) error {
 			_ = ps.Close()
 			return fmt.Errorf("unexpected statement type")
 		}
-		kind, err := stmt.StatementType()
+		var typeErr error
+		kind, typeErr = stmt.StatementType()
 		closeErr := stmt.Close()
-		if err != nil {
-			return err
+		if typeErr != nil {
+			return typeErr
 		}
 		if closeErr != nil {
 			return closeErr
 		}
 		return allowUserSQL(kind, allowWrite)
 	})
+	return kind, err
 }
 
 func allowUserSQL(kind duckdb.StmtType, allowWrite bool) error {

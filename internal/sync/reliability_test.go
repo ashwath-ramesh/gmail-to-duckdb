@@ -805,8 +805,12 @@ func TestDirtyNoopSyncRepairsFTS(t *testing.T) {
 		t.Fatalf("noop incremental listed: %d", api.listCalls)
 	}
 	ok, err := db.HasFTS(ctx)
-	if err != nil || !ok {
-		t.Fatalf("noop sync must repair %v %v", ok, err)
+	if err != nil || ok {
+		t.Fatalf("noop sync must not rebuild index %v %v", ok, err)
+	}
+	hits, err := db.ListMessages(ctx, store.ListFilter{Limit: 10, Query: "later"})
+	if err != nil || len(hits) != 1 || hits[0].ID != "m" {
+		t.Fatalf("literal membership %#v %v", hits, err)
 	}
 }
 

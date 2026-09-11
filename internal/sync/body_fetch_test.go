@@ -219,8 +219,8 @@ func TestBodiesPartialRebuildsFTS(t *testing.T) {
 		t.Fatal("expected incomplete")
 	}
 	fts, err := db.HasFTS(ctx)
-	if err != nil || !fts {
-		t.Fatalf("partial body writes must rebuild fts: %v %v", fts, err)
+	if err != nil || fts {
+		t.Fatalf("sync must not rebuild index: %v %v", fts, err)
 	}
 	okAt, ok, err := db.GetState(ctx, store.StateLastSyncOK)
 	if err != nil || ok {
@@ -412,8 +412,8 @@ func TestBodiesIncompleteThenTransportKeepsBoth(t *testing.T) {
 		t.Fatalf("want incomplete+transport, got %v", err)
 	}
 	fts, err := db.HasFTS(ctx)
-	if err != nil || !fts {
-		t.Fatalf("successful writes must rebuild fts: %v %v", fts, err)
+	if err != nil || fts {
+		t.Fatalf("sync must not rebuild index: %v %v", fts, err)
 	}
 	hits, err := db.ListMessages(ctx, store.ListFilter{Limit: 10, Query: "pineapple"})
 	if err != nil {

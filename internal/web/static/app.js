@@ -8,6 +8,7 @@ let offset = 0;
 let currentQuery = "";
 let debounceTimer = null;
 let abort = null;
+let reqGen = 0;
 
 document.getElementById("tab-mail").onclick = () => show("mail");
 document.getElementById("tab-stats").onclick = () => {
@@ -17,16 +18,23 @@ document.getElementById("tab-stats").onclick = () => {
 filters.onsubmit = (e) => {
   e.preventDefault();
   clearTimeout(debounceTimer);
-  resetAndLoad();
+  resetAndLoad(++reqGen);
 };
 filters.q.addEventListener("input", () => {
+  if (abort) abort.abort();
+  const gen = ++reqGen;
   clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(resetAndLoad, 250);
+  debounceTimer = setTimeout(() => resetAndLoad(gen), 100);
 });
-filters.unread.onchange = resetAndLoad;
+filters.unread.onchange = () => {
+  clearTimeout(debounceTimer);
+  debounceTimer = null;
+  if (abort) abort.abort();
+  resetAndLoad(++reqGen);
+};
 moreEl.onclick = () => {
   if (searchBox()) offset = listEl.querySelectorAll(".row").length;
-  loadList();
+  loadList(reqGen);
 };
 document.getElementById("sync-now").onclick = async () => {
   const btn = document.getElementById("sync-now");
@@ -50,11 +58,15 @@ function searchBox() {
   return filters.q.value.trim();
 }
 
-function resetAndLoad() {
+function resetAndLoad(gen) {
+  if (gen == null) gen = reqGen;
+  if (gen != reqGen) return;
+  clearTimeout(debounceTimer);
+  debounceTimer = null;
   cursor = null;
   offset = 0;
   listEl.innerHTML = "";
-  loadList();
+  loadList(gen);
 }
 
 function show(which) {
@@ -83,26 +95,29 @@ function api(path, opts) {
   return fetch(u, { credentials: "same-origin", ...opts });
 }
 
-async function loadList() {
+async function loadList(gen) {
+  if (gen != reqGen) return;
   if (abort) abort.abort();
   abort = new AbortController();
   const signal = abort.signal;
+  const myGen = gen;
   let j;
   try {
     const r = await api("/api/messages?" + qs(), { signal });
     j = await r.json();
+    if (signal.aborted || myGen != reqGen) return;
     if (!r.ok) {
       listEl.textContent = j.error || "Search failed.";
       moreEl.hidden = true;
       return;
     }
   } catch (err) {
-    if (err.name === "AbortError") return;
+    if (err.name === "AbortError" || signal.aborted || myGen != reqGen) return;
     if (!listEl.querySelector(".row")) listEl.textContent = "Search failed.";
     moreEl.hidden = true;
     return;
   }
-  if (signal.aborted) return;
+  if (signal.aborted || myGen != reqGen) return;
   const msgs = j.messages || [];
   if (msgs.length === 0) {
     if (!listEl.querySelector(".row")) listEl.textContent = "No matches.";
@@ -224,6 +239,7 @@ async function loadStatus() {
       parts.push("search " + (s.body_coverage.search_covers || "metadata"));
       parts.push(s.body_coverage.with_body + "/" + s.body_coverage.total + " bodies");
     }
+    if (s.search_index_state) parts.push("index " + s.search_index_state);
     if (s.last_error) parts.push("error: " + s.last_error);
     el.textContent = parts.join(" · ") || "ready";
     const busy = s.phase && s.phase !== "idle";
@@ -234,6 +250,6 @@ async function loadStatus() {
   }
 }
 
-loadList();
+loadList(++reqGen);
 loadStatus();
 setInterval(loadStatus, 2000);

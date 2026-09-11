@@ -42,9 +42,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer db.Close()
-	if err := db.EnsureFTS(ctx); err != nil {
-		writeDiag(stderr, fmt.Sprintf("fts: %v", err))
-	}
+	db.IndexLog = func(format string, a ...any) { writeDiag(stderr, fmt.Sprintf(format, a...)) }
 
 	tok, err := web.NewToken()
 	if err != nil {
@@ -86,6 +84,11 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer func() { _ = web.RemoveServeFile(*cf.db) }()
+	fmt.Fprintln(stdout, "listening on", listenURL)
+	_ = openurl.Open(listenURL)
+	s.StartStatus(ctx)
+	defer s.StopStatus()
+	db.StartMaintenance(ctx)
 
 	startup := asServe || interval > 0
 	if startup && s.Sync != nil {
@@ -110,7 +113,5 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 		}()
 	}
 
-	fmt.Fprintln(stdout, "listening on", listenURL)
-	_ = openurl.Open(listenURL)
 	return <-errc
 }

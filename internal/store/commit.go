@@ -29,57 +29,47 @@ func StateClear() *string {
 }
 
 func (d *DB) CommitSyncPage(ctx context.Context, p PageCommit) error {
-	if err := d.acquire(ctx); err != nil {
-		return err
-	}
-	defer d.release()
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if len(p.Messages) > 0 || len(p.Tombstones) > 0 || p.MarkMissing {
-		if err := markFTSDirty(ctx, tx); err != nil {
+	changed := len(p.Messages) > 0 || len(p.Tombstones) > 0 || p.MarkMissing
+	err := d.withTx(ctx, func(tx *sql.Tx) error {
+		if err := upsertMessagesTx(ctx, tx, p.Messages); err != nil {
 			return err
 		}
-	}
-	if err := upsertMessagesTx(ctx, tx, p.Messages); err != nil {
-		return err
-	}
-	if err := markDeletedTx(ctx, tx, p.Tombstones); err != nil {
-		return err
-	}
-	if err := addSeenTx(ctx, tx, p.Seen); err != nil {
-		return err
-	}
-	if p.MarkMissing {
-		if _, err := markMissingDeletedTx(ctx, tx); err != nil {
+		if err := markDeletedTx(ctx, tx, p.Tombstones); err != nil {
 			return err
 		}
-	} else if p.ResetSeen {
-		if err := resetSeenTx(ctx, tx); err != nil {
+		if err := addSeenTx(ctx, tx, p.Seen); err != nil {
 			return err
 		}
+		if p.MarkMissing {
+			if _, err := markMissingDeletedTx(ctx, tx); err != nil {
+				return err
+			}
+		} else if p.ResetSeen {
+			if err := resetSeenTx(ctx, tx); err != nil {
+				return err
+			}
+		}
+		if err := applyStateTx(ctx, tx, "list_page_token", p.ListPage); err != nil {
+			return err
+		}
+		if err := applyStateTx(ctx, tx, "history_page_token", p.HistoryPage); err != nil {
+			return err
+		}
+		if err := applyStateTx(ctx, tx, "history_start_id", p.HistoryStart); err != nil {
+			return err
+		}
+		if err := applyStateTx(ctx, tx, "history_id", p.HistoryID); err != nil {
+			return err
+		}
+		if err := applyStateTx(ctx, tx, "full_phase", p.FullPhase); err != nil {
+			return err
+		}
+		return applyStateTx(ctx, tx, "full_start_history_id", p.FullStartID)
+	})
+	if err == nil && changed {
+		d.notifyIndex()
 	}
-	if err := applyStateTx(ctx, tx, "list_page_token", p.ListPage); err != nil {
-		return err
-	}
-	if err := applyStateTx(ctx, tx, "history_page_token", p.HistoryPage); err != nil {
-		return err
-	}
-	if err := applyStateTx(ctx, tx, "history_start_id", p.HistoryStart); err != nil {
-		return err
-	}
-	if err := applyStateTx(ctx, tx, "history_id", p.HistoryID); err != nil {
-		return err
-	}
-	if err := applyStateTx(ctx, tx, "full_phase", p.FullPhase); err != nil {
-		return err
-	}
-	if err := applyStateTx(ctx, tx, "full_start_history_id", p.FullStartID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return err
 }
 
 func applyStateTx(ctx context.Context, tx *sql.Tx, key string, v *string) error {

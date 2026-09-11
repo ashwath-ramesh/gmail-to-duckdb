@@ -155,13 +155,6 @@ func (r *Runner) sync(ctx context.Context, opt Options) error {
 		}
 		return err
 	}
-	r.progress("fts")
-	if err := r.DB.EnsureFTS(ctx); err != nil {
-		if bodyErr != nil {
-			return errors.Join(err, bodyErr)
-		}
-		return err
-	}
 	return bodyErr
 }
 

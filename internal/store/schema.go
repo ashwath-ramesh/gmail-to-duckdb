@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	SchemaVersion      = 3
+	SchemaVersion      = 4
 	StateSchemaVersion = "schema_version"
 	StateLastSyncOK    = "last_sync_ok"
 	StateLastSyncError = "last_sync_error"
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS messages (
   body_fetched BOOLEAN DEFAULT false,
   synced_at TIMESTAMP,
   search_text VARCHAR,
+  search_revision UBIGINT DEFAULT 0,
   headers JSON
 );
 CREATE TABLE IF NOT EXISTS labels (
@@ -101,6 +102,11 @@ func (d *DB) migrateSchema(ctx context.Context) error {
 			return err
 		}
 	}
+	if ver < 4 {
+		if err := migrateToV4Schema(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if ver < 2 {
 		if err := migrateToV2Data(ctx, tx); err != nil {
 			return err
@@ -108,6 +114,11 @@ func (d *DB) migrateSchema(ctx context.Context) error {
 	}
 	if ver < 3 {
 		if err := migrateToV3Data(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if ver < 4 {
+		if err := migrateToV4Data(ctx, tx); err != nil {
 			return err
 		}
 	}
@@ -159,7 +170,21 @@ WHERE COALESCE(body_fetched, false) AND (body IS NULL OR body = '')
 	if err := discardUnsafeCursorsTx(ctx, tx); err != nil {
 		return err
 	}
-	return markFTSDirty(ctx, tx)
+	return markLegacySearchRepair(ctx, tx)
+}
+
+func migrateToV4Schema(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS search_revision UBIGINT DEFAULT 0`); err != nil {
+		return fmt.Errorf("search_revision: %w", err)
+	}
+	return nil
+}
+
+func migrateToV4Data(ctx context.Context, tx *sql.Tx) error {
+	if err := initSearchMetaTx(ctx, tx); err != nil {
+		return err
+	}
+	return markLegacySearchRepair(ctx, tx)
 }
 
 func discardUnsafeCursorsTx(ctx context.Context, tx *sql.Tx) error {

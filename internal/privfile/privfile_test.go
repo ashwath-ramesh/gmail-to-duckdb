@@ -337,6 +337,73 @@ func TestMkdirPrivateDoesNotChmodParent(t *testing.T) {
 	assertNewAppDirPrivate(t, child)
 }
 
+func TestReplaceHardensSourceAndRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dest := filepath.Join(dir, "dest")
+	if err := os.WriteFile(src, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := makePermissive(src); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(dest, []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := Replace(src, dest); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivate(t, dest)
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("dest %s", got)
+	}
+
+	link := filepath.Join(dir, "link")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		skipIfNoSymlink(t, err)
+	}
+	if err := Replace(link, dest); err == nil {
+		t.Fatal("expected symlink source reject")
+	}
+	got, err = os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("dest changed after rejected replace: %s", got)
+	}
+}
+
+func TestReplaceRejectsNonRegularSource(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "srcdir")
+	dest := filepath.Join(dir, "dest")
+	if err := os.Mkdir(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(dest, []byte("keep")); err != nil {
+		t.Fatal(err)
+	}
+	if err := Replace(src, dest); err == nil {
+		t.Fatal("expected non-regular source reject")
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "keep" {
+		t.Fatalf("dest changed: %s", got)
+	}
+}
+
 func report(errc chan<- error, err error) {
 	select {
 	case errc <- err:

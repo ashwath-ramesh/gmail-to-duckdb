@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +24,50 @@ func searchHits(t *testing.T, db *DB, q string) []Message {
 func searchIDs(t *testing.T, db *DB, q string) []string {
 	t.Helper()
 	return ids(searchHits(t, db, q))
+}
+
+func mustIndexed(t *testing.T, db *DB, q string, f ListFilter) []Message {
+	t.Helper()
+	parsed, err := search.Parse(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Limit <= 0 {
+		f.Limit = 50
+	}
+	f.Query = q
+	msgs, err := db.indexedSearch(context.Background(), f, parsed)
+	if err != nil {
+		t.Fatalf("indexed %q: %v", q, err)
+	}
+	return msgs
+}
+
+func indexedIDs(t *testing.T, db *DB, q string) []string {
+	t.Helper()
+	return ids(mustIndexed(t, db, q, ListFilter{Limit: 50}))
+}
+
+func messageRev(t *testing.T, db *DB, id string) int64 {
+	t.Helper()
+	var n int64
+	if err := db.sql.QueryRowContext(context.Background(), "SELECT COALESCE(search_revision, 0) FROM messages WHERE id = ?", id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func literalIDs(t *testing.T, db *DB, q string) []string {
+	t.Helper()
+	parsed, err := search.Parse(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := db.literalSearch(context.Background(), ListFilter{Limit: 50, Query: q}, parsed)
+	if err != nil {
+		t.Fatalf("literal %q: %v", q, err)
+	}
+	return ids(msgs)
 }
 
 func sortedCopy(in []string) []string {
@@ -248,7 +294,61 @@ func TestSearchTieOrderAndPagination(t *testing.T) {
 	}
 }
 
-func TestSearchRankUsesFTSWhenReady(t *testing.T) {
+func TestLiteralSearchDeepOffsetFallback(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	base := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+	const n = 300
+	msgs := make([]Message, 0, n+1)
+	for i := 0; i < n; i++ {
+		m := sample("n"+strconv.Itoa(i), base.Add(time.Duration(i)*time.Minute))
+		m.Subject = "zz page"
+		msgs = append(msgs, m)
+	}
+	dead := sample("dead", base.Add(time.Duration(n)*time.Minute))
+	dead.Subject = "zz page"
+	msgs = append(msgs, dead)
+	if err := db.UpsertMessages(ctx, msgs); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkDeleted(ctx, []string{"dead"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RebuildFTS(ctx); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := search.Parse("zz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.indexedSearch(ctx, ListFilter{Limit: 10, Query: "zz"}, parsed); !errors.Is(err, errIndexSkip) {
+		t.Fatalf("want fallback %v", err)
+	}
+	const offset, limit = 260, 10
+	page, err := db.ListMessages(ctx, ListFilter{Limit: limit, Offset: offset, Query: "zz"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]string, limit)
+	for i := 0; i < limit; i++ {
+		want[i] = "n" + strconv.Itoa(n-1-offset-i)
+	}
+	if !slices.Equal(ids(page), want) {
+		t.Fatalf("page %#v want %#v", ids(page), want)
+	}
+	empty, err := db.ListMessages(ctx, ListFilter{Limit: 10, Offset: n, Query: "zz"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("past end %#v", ids(empty))
+	}
+}
+
+// Newest-first order is the product rule. The ready-index path keeps that
+// order. The compatibility `fts` bool is true when the index is ready; it
+// does not mean BM25 replaced newest-first.
+func TestSearchNewestFirstWhenIndexReady(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)

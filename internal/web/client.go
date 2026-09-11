@@ -30,10 +30,15 @@ func Dial(dbPath string) (*Client, error) {
 	c := &Client{info: info, http: &http.Client{Timeout: 30 * time.Second}}
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
-	if _, err := c.Status(ctx); err != nil {
+	if err := c.Health(ctx); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+func (c *Client) Health(ctx context.Context) error {
+	_, err := c.get(ctx, "/api/health", nil)
+	return err
 }
 
 func (c *Client) Close() error { return nil }

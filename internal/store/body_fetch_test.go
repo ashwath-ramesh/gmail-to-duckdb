@@ -130,11 +130,11 @@ func TestIDsNeedingFetchKeyset(t *testing.T) {
 	}
 }
 
-func TestFreshOpenIsSchema3WithHeaders(t *testing.T) {
+func TestFreshOpenIsSchema4WithHeaders(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	v, ok, err := db.GetState(ctx, StateSchemaVersion)
-	if err != nil || !ok || v != "3" {
+	if err != nil || !ok || v != "4" {
 		t.Fatalf("fresh schema version %q %v %v", v, ok, err)
 	}
 	tables, err := db.DescribeSchema(ctx)
@@ -250,7 +250,7 @@ func assertMigratedV1(t *testing.T, db *DB) {
 	t.Helper()
 	ctx := context.Background()
 	v, ok, err := db.GetState(ctx, StateSchemaVersion)
-	if err != nil || !ok || v != "3" {
+	if err != nil || !ok || v != "4" {
 		t.Fatalf("migrated version %q %v %v", v, ok, err)
 	}
 	hid, ok, err := db.GetState(ctx, "history_id")
