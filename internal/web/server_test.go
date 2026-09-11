@@ -372,6 +372,7 @@ func createUITableMacro(t *testing.T, s *Server, name, expr string) {
 
 func TestStatusSchemaSQL(t *testing.T) {
 	s, _ := testServer(t)
+	seedStatus(t, s)
 	h := s.Handler()
 	w := req(t, h, http.MethodGet, "/api/status")
 	if w.Code != 200 {
@@ -381,7 +382,7 @@ func TestStatusSchemaSQL(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
-	if env.SchemaVersion != 3 || env.Phase != "idle" {
+	if env.SchemaVersion != 4 || env.Phase != "idle" {
 		t.Fatalf("%+v", env)
 	}
 	if env.UntrustedContent {

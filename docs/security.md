@@ -44,13 +44,19 @@ The DuckDB UI on port 4213 has no session token. It stays off unless you pass `-
 
 Dynamic `PIVOT table ON ...` is rejected. DuckDB expands that form into writes and multiple statements. Use `FROM table PIVOT (...)` for a supported read.
 
-## Full-text extension
+## Local search index
 
-The process may `LOAD` or `INSTALL` the DuckDB `fts` extension on this machine. That download is a local DuckDB extension, not an upload of mail. If the index is missing or `fts` is false, literal substring search still works.
+DuckDB stores raw mail bodies and metadata in the mailbox file. Search acceleration adds a disposable owner-only SQLite sidecar (`*.duckdb.search/index.sqlite`). That sidecar stores tokenized postings plus message ids, internal dates, and search revisions. Those fields can reveal message content. Both files are plaintext. Owner-only mode is not encryption.
+
+The process does not download a DuckDB FTS extension. DuckDB remains the verify authority. A symlink, non-regular, or unowned cache directory or sidecar is a startup error. `--duckdb-ui` disables acceleration for that run and leaves the cache dirty. The next normal `serve` may rebuild it.
+
+If the index is missing or `fts` is false, literal substring search still works. `fts` is a ready-index compatibility flag. Ranking stays newest-first. Background maintenance rebuilds or applies deltas without blocking the listener. Repair sizes live canonical text. Full and delta builds size cached `search_text` only.
+
+`/api/status` returns a cached snapshot (`status_as_of`) and does not query DuckDB on the request path.
 
 ## Database path and sidecars
 
-- Keep `credentials.json`, `*.token.json`, `*.serve.json`, and `*.duckdb` out of git.
+- Keep `credentials.json`, `*.token.json`, `*.serve.json`, `*.duckdb`, and `*.duckdb.search` out of git.
 - Secret files are owner-only. Unix uses `0600`. Windows uses current-user and SYSTEM ACLs.
 - The process sets Unix umask `077` once at start. It does not restore the previous umask.
 - The database path stays where you set it. The tool does not move the file. The path is a filesystem path. A NUL byte, DSN options after `?`, or an in-memory URL is a startup error. A Windows drive colon is allowed.

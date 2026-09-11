@@ -124,7 +124,7 @@ func TestStatusSearchGetSchema(t *testing.T) {
 		if err := json.Unmarshal(out.Bytes(), &env); err != nil {
 			t.Fatalf("%v: %v %s", args, err, out.String())
 		}
-		if env.SchemaVersion != 3 {
+		if env.SchemaVersion != 4 {
 			t.Fatalf("%v schema %d", args, env.SchemaVersion)
 		}
 	}

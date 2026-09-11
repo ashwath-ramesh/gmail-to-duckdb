@@ -18,31 +18,25 @@ func (d *DB) BindAccount(ctx context.Context, email string) error {
 	if email == "" {
 		return ErrEmptyProfile
 	}
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	var stored string
-	err = tx.QueryRowContext(ctx, "SELECT value FROM sync_state WHERE key = ?", StateProfileEmail).Scan(&stored)
-	if err == nil {
-		if !strings.EqualFold(stored, email) {
-			return ErrAccountMismatch
+	return d.withTx(ctx, func(tx *sql.Tx) error {
+		var stored string
+		err := tx.QueryRowContext(ctx, "SELECT value FROM sync_state WHERE key = ?", StateProfileEmail).Scan(&stored)
+		if err == nil {
+			if !strings.EqualFold(stored, email) {
+				return ErrAccountMismatch
+			}
+			return nil
 		}
-		return tx.Commit()
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	var n int
-	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM messages").Scan(&n); err != nil {
-		return err
-	}
-	if n > 0 {
-		return ErrUnboundDatabase
-	}
-	if err := setStateTx(ctx, tx, StateProfileEmail, email); err != nil {
-		return err
-	}
-	return tx.Commit()
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		var n int
+		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM messages").Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			return ErrUnboundDatabase
+		}
+		return setStateTx(ctx, tx, StateProfileEmail, email)
+	})
 }

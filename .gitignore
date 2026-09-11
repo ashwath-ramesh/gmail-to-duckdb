@@ -8,5 +8,6 @@ credentials.json
 *.duckdb.wal.checkpoint
 *.duckdb.wal.recovery
 *.duckdb.tmp
+*.duckdb.search
 *.duckdb.files
 .DS_Store

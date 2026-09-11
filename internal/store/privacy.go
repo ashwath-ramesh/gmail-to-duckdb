@@ -29,11 +29,26 @@ func prepareOpen(path string) (string, string, error) {
 	if err := hardenExisting(path); err != nil {
 		return "", "", err
 	}
+	if err := hardenSearchSidecar(path); err != nil {
+		return "", "", err
+	}
 	spill, err := prepareSpill(path)
 	if err != nil {
 		return "", "", err
 	}
 	return path, spill, nil
+}
+
+func hardenSearchSidecar(dbPath string) error {
+	dir := SearchDir(dbPath)
+	_, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return inspectCacheDir(dir, false)
 }
 
 func prepareParent(dir string) error {

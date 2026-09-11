@@ -100,7 +100,7 @@ func Doctor(ctx context.Context, cfg config.Config) query.Envelope {
 				env.SchemaVersion = st.SchemaVersion
 				env.LastError = st.LastError
 				env.Checks = append(env.Checks, query.Check{Name: "database", OK: true, Detail: "owned by serve"})
-				env.Checks = append(env.Checks, query.Check{Name: "fts", OK: st.FTS, Detail: ftsDetail(st.FTS)})
+				env.Checks = append(env.Checks, query.Check{Name: "fts", OK: true, Detail: ftsDetail(st.FTS)})
 			} else {
 				env.Checks = append(env.Checks, query.Check{Name: "database", OK: false, Detail: err.Error()})
 				env.Checks = append(env.Checks, query.Check{Name: "fts", OK: false, Detail: "serve status failed"})
@@ -141,9 +141,9 @@ func Doctor(ctx context.Context, cfg config.Config) query.Envelope {
 
 func ftsDetail(ok bool) string {
 	if ok {
-		return "fts index ready"
+		return "search index ready"
 	}
-	return "fts index missing"
+	return "search index pending; literal search works"
 }
 
 func DoctorOK(env query.Envelope) bool {
@@ -235,22 +235,13 @@ func checkDB(path string) (query.Check, *store.DB) {
 }
 
 func checkFTS(ctx context.Context, db *store.DB) query.Check {
-	c := query.Check{Name: "fts"}
-	if err := db.EnsureFTS(ctx); err != nil {
-		c.Detail = err.Error()
-		return c
-	}
+	c := query.Check{Name: "fts", OK: true}
 	ok, err := db.HasFTS(ctx)
 	if err != nil {
 		c.Detail = err.Error()
 		return c
 	}
-	c.OK = ok
-	if ok {
-		c.Detail = "fts index ready"
-	} else {
-		c.Detail = "fts index missing"
-	}
+	c.Detail = ftsDetail(ok)
 	return c
 }
 

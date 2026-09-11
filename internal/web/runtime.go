@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	mailsync "github.com/ashwath-ramesh/gmail-to-duckdb/internal/sync"
 )
 
@@ -19,12 +21,13 @@ type runtime struct {
 	running   bool
 	phase     string
 	processed int
-	lastErr   string
-	lastOK    string
-	coverage  query.BodyCoverage
-	schemaVer int
-	fts       bool
-	cached    bool
+	syncErr   string
+	env       query.Envelope
+	hasCache  bool
+	wake      chan struct{}
+	stop      context.CancelFunc
+	wg        sync.WaitGroup
+	started   bool
 }
 
 func (s *Server) SetProgress(p mailsync.Progress) {
@@ -34,15 +37,94 @@ func (s *Server) SetProgress(p mailsync.Progress) {
 	s.rt.processed = p.Processed
 }
 
-func (s *Server) cacheFrom(env query.Envelope) {
+func (s *Server) SeedStatus(ctx context.Context) {
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+	}
+	env, err := query.Status(ctx, s.DB)
+	if err != nil {
+		return
+	}
 	s.rt.mu.Lock()
-	defer s.rt.mu.Unlock()
-	s.rt.cached = true
-	s.rt.schemaVer = env.SchemaVersion
-	s.rt.lastOK = env.LastSync
-	s.rt.lastErr = env.LastError
-	s.rt.coverage = env.BodyCoverage
-	s.rt.fts = env.FTS
+	s.rt.env = env
+	s.rt.hasCache = true
+	s.rt.mu.Unlock()
+}
+
+func (s *Server) StartStatus(ctx context.Context) {
+	s.rt.mu.Lock()
+	if s.rt.started {
+		s.rt.mu.Unlock()
+		return
+	}
+	s.rt.started = true
+	if s.rt.wake == nil {
+		s.rt.wake = make(chan struct{}, 1)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	s.rt.stop = cancel
+	s.rt.wg.Add(1)
+	s.rt.mu.Unlock()
+	go s.statusLoop(ctx)
+}
+
+func (s *Server) StopStatus() {
+	s.rt.mu.Lock()
+	stop := s.rt.stop
+	s.rt.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	s.rt.wg.Wait()
+}
+
+func (s *Server) statusLoop(ctx context.Context) {
+	defer s.rt.wg.Done()
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	s.refreshStatus(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.rt.wake:
+		case <-tick.C:
+		}
+		s.refreshStatus(ctx)
+	}
+}
+
+func (s *Server) wakeStatus() {
+	s.rt.mu.Lock()
+	wake := s.rt.wake
+	s.rt.mu.Unlock()
+	if wake == nil {
+		return
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) noteChange() {
+	s.wakeStatus()
+}
+
+func (s *Server) refreshStatus(ctx context.Context) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	env, err := query.Status(ctx, s.DB)
+	if err != nil {
+		return
+	}
+	s.rt.mu.Lock()
+	s.rt.env = env
+	s.rt.hasCache = true
+	s.rt.mu.Unlock()
 }
 
 func (s *Server) beginSync() error {
@@ -56,7 +138,7 @@ func (s *Server) beginSync() error {
 	}
 	s.rt.running = true
 	s.rt.phase = "starting"
-	s.rt.lastErr = ""
+	s.rt.syncErr = ""
 	return nil
 }
 
@@ -65,23 +147,15 @@ func (s *Server) endSync(err error) {
 	s.rt.running = false
 	s.rt.phase = "idle"
 	if err != nil {
-		s.rt.lastErr = err.Error()
+		s.rt.syncErr = err.Error()
+	} else {
+		s.rt.syncErr = ""
 	}
 	s.rt.mu.Unlock()
-	if env, e := query.Status(context.Background(), s.DB); e == nil {
-		s.cacheFrom(env)
-	}
-	if err != nil {
-		s.rt.mu.Lock()
-		s.rt.lastErr = err.Error()
-		s.rt.mu.Unlock()
-	}
+	s.wakeStatus()
 }
 
 func (s *Server) doSync(ctx context.Context, opt mailsync.Options) error {
-	if env, err := query.Status(ctx, s.DB); err == nil {
-		s.cacheFrom(env)
-	}
 	return s.Sync(ctx, opt)
 }
 
@@ -93,42 +167,39 @@ func (s *Server) syncContext() context.Context {
 }
 
 func (s *Server) liveStatus(ctx context.Context) (query.Envelope, error) {
+	_ = ctx
 	s.rt.mu.Lock()
-	running := s.rt.running
+	defer s.rt.mu.Unlock()
 	env := query.Envelope{
-		SchemaVersion: s.rt.schemaVer,
-		LastSync:      s.rt.lastOK,
-		LastError:     s.rt.lastErr,
-		BodyCoverage:  s.rt.coverage,
+		SchemaVersion: store.SchemaVersion,
+		DuckDBUI:      s.AllowDuckUI,
 		Phase:         s.rt.phase,
 		Processed:     s.rt.processed,
-		FTS:           s.rt.fts,
 	}
-	cached := s.rt.cached
-	s.rt.mu.Unlock()
-	if running && cached {
+	if !s.rt.hasCache {
 		if env.Phase == "" {
-			env.Phase = "running"
+			env.Phase = "initializing"
 		}
-		env.DuckDBUI = s.AllowDuckUI
+		if s.rt.syncErr != "" {
+			env.LastError = s.rt.syncErr
+		}
 		return env, nil
 	}
-	out, err := query.Status(ctx, s.DB)
-	if err != nil {
-		return query.Envelope{}, err
+	env = s.rt.env
+	env.DuckDBUI = s.AllowDuckUI
+	env.Phase = s.rt.phase
+	env.Processed = s.rt.processed
+	if env.Phase == "" {
+		if s.rt.running {
+			env.Phase = "running"
+		} else {
+			env.Phase = "idle"
+		}
 	}
-	if env.Phase != "" {
-		out.Phase = env.Phase
-		out.Processed = env.Processed
+	if s.rt.syncErr != "" {
+		env.LastError = s.rt.syncErr
 	}
-	if out.Phase == "" {
-		out.Phase = "idle"
-	}
-	if env.LastError != "" && out.LastError == "" {
-		out.LastError = env.LastError
-	}
-	out.DuckDBUI = s.AllowDuckUI
-	return out, nil
+	return env, nil
 }
 
 func (s *Server) StartSync(ctx context.Context, opt mailsync.Options) error {

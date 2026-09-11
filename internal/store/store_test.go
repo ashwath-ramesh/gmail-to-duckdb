@@ -409,15 +409,15 @@ func TestEnsureFTS(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("fts after %v %v", ok, err)
 	}
-	if err := db.SetState(ctx, stateFTSIndex, "old"); err != nil {
+	if err := db.SetState(ctx, stateSearchCacheID, "old"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.EnsureFTS(ctx); err != nil {
 		t.Fatal(err)
 	}
-	ver, has, err := db.GetState(ctx, stateFTSIndex)
-	if err != nil || !has || ver != ftsIndexVer {
-		t.Fatalf("ver %q %v %v", ver, has, err)
+	ok, err = db.hasFTS(ctx)
+	if err != nil || !ok {
+		t.Fatalf("ensure after identity change %v %v", ok, err)
 	}
 }
 
@@ -473,9 +473,14 @@ func TestConcurrentHasFTSRebuildList(t *testing.T) {
 	}
 }
 
-func TestHasFTSAfterAllowedDropFTSSchema(t *testing.T) {
+func TestHasFTSAfterCorruptSearchCache(t *testing.T) {
 	ctx := context.Background()
-	db := testDB(t)
+	path := filepath.Join(dbParent(t), "mail.duckdb")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
 	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	msg := sample("m1", at)
 	msg.Subject = "pineapple note"
@@ -489,26 +494,29 @@ func TestHasFTSAfterAllowedDropFTSSchema(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("fts after rebuild %v %v", ok, err)
 	}
-	if _, err := db.QuerySQL(ctx, "DROP SCHEMA fts_main_messages CASCADE", true); err != nil {
+	if err := db.idx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(SearchDir(path), "index.sqlite"), []byte("corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ok, err = db.HasFTS(ctx)
 	if err != nil || ok {
-		t.Fatalf("fts after drop %v %v", ok, err)
+		t.Fatalf("fts after corrupt %v %v", ok, err)
 	}
 	hits, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "pineapple"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(hits) != 1 || hits[0].ID != "m1" {
-		t.Fatalf("like fallback after drop: %#v", ids(hits))
+		t.Fatalf("like fallback after corrupt: %#v", ids(hits))
 	}
 	short, err := db.ListMessages(ctx, ListFilter{Limit: 10, Query: "p"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(short) != 1 || short[0].ID != "m1" {
-		t.Fatalf("short query after drop: %#v", ids(short))
+		t.Fatalf("short query after corrupt: %#v", ids(short))
 	}
 }
 
@@ -897,25 +905,26 @@ func TestQuerySQLConnRecover(t *testing.T) {
 
 func TestFTSBootstrapOptional(t *testing.T) {
 	if err := bootstrapTrusted(failExec{needle: "fts"}, Options{}); err != nil {
-		t.Fatalf("fts must be optional: %v", err)
+		t.Fatalf("fts load must not run: %v", err)
 	}
 	if err := bootstrapTrusted(failExec{needle: "ui"}, Options{DuckUI: true}); err == nil {
 		t.Fatal("expected duckdb ui failure")
 	}
 }
 
-func TestSQLUsableWhenFTSUnavailable(t *testing.T) {
+func TestSQLUsableWhenIndexUnavailable(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(dbParent(t), "mail.duckdb")
-	db, err := openWith(path, Options{}, func(ex execer) execer {
-		return ftsBlock{ex}
-	})
+	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	if err := os.WriteFile(SearchDir(path), []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.RebuildFTS(ctx); err == nil {
-		t.Fatal("expected fts unavailable")
+		t.Fatal("expected index unavailable")
 	}
 	if _, err := db.QuerySQL(ctx, "SELECT 1 AS n", false); err != nil {
 		t.Fatal(err)
@@ -967,15 +976,6 @@ func (f failExec) ExecContext(ctx context.Context, query string, args ...any) (s
 	return stubResult{}, nil
 }
 
-type ftsBlock struct{ execer }
-
-func (f ftsBlock) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
-	if strings.Contains(strings.ToLower(q), "fts") {
-		return nil, errors.New("fts unavailable")
-	}
-	return f.execer.ExecContext(ctx, q, args...)
-}
-
 type stubResult struct{}
 
 func (stubResult) LastInsertId() (int64, error) { return 0, nil }
@@ -1013,7 +1013,7 @@ func TestCoverageAndSchemaVersion(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	v, ok, err := db.GetState(ctx, StateSchemaVersion)
-	if err != nil || !ok || v != "3" {
+	if err != nil || !ok || v != "4" {
 		t.Fatalf("schema version %q %v %v", v, ok, err)
 	}
 	c, err := db.Coverage(ctx)

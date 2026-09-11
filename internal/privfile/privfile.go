@@ -90,6 +90,32 @@ func HardenDir(path string) error {
 	return hardenDir(path)
 }
 
+// Replace replaces dest with src as one file. dest must be absent or a regular file.
+// It hardens and checks src first so a symlink, non-regular, or shared source
+// cannot replace dest. dest never receives broad source permissions.
+// It does not follow a symlink.
+func Replace(src, dest string) error {
+	if src == "" || dest == "" {
+		return fmt.Errorf("empty path")
+	}
+	if err := Harden(src); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if err := Check(src); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if err := rejectBadDest(dest); err != nil {
+		return err
+	}
+	if err := replaceFile(src, dest); err != nil {
+		return fmt.Errorf("replace: %w", err)
+	}
+	if err := Harden(dest); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(dest))
+}
+
 func rejectBadDest(path string) error {
 	fi, err := os.Lstat(path)
 	if os.IsNotExist(err) {

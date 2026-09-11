@@ -64,6 +64,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stats", s.listStats)
 	mux.HandleFunc("GET /api/stats/{name}", s.stat)
 	mux.HandleFunc("POST /api/duckdb-ui", s.duckUI)
+	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("GET /api/schema", s.schema)
 	mux.HandleFunc("POST /api/sql", s.sql)
@@ -182,7 +183,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, code)
 		return
 	}
-	env, err := query.Status(r.Context(), s.DB)
+	env, err := s.liveStatus(r.Context())
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
@@ -209,6 +210,10 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, env)
+}
+
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
@@ -242,6 +247,9 @@ func (s *Server) sql(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
+	}
+	if req.Write {
+		s.noteChange()
 	}
 	writeJSON(w, env)
 }
@@ -306,6 +314,7 @@ func (s *Server) body(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, code)
 		return
 	}
+	s.noteChange()
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -345,6 +354,8 @@ func (s *Server) duckUI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
+	_ = s.DB.DisableSearchAccel(r.Context())
+	s.noteChange()
 	var u string
 	if err := s.DB.SQL().QueryRowContext(r.Context(), "CALL get_ui_url()").Scan(&u); err != nil || u == "" {
 		if err == nil {

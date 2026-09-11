@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -12,14 +13,14 @@ import (
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 )
 
-func TestSchemaVersionIs3(t *testing.T) {
-	if SchemaVersion != 3 {
-		t.Fatalf("SchemaVersion=%d want 3", SchemaVersion)
+func TestSchemaVersionIs4(t *testing.T) {
+	if SchemaVersion != 4 {
+		t.Fatalf("SchemaVersion=%d want 4", SchemaVersion)
 	}
 	ctx := context.Background()
 	db := testDB(t)
 	v, ok, err := db.GetState(ctx, StateSchemaVersion)
-	if err != nil || !ok || v != "3" {
+	if err != nil || !ok || v != "4" {
 		t.Fatalf("fresh schema version %q %v %v", v, ok, err)
 	}
 }
@@ -289,9 +290,7 @@ func TestEnsureFTSNoopWhenReady(t *testing.T) {
 func TestFailedRebuildStaysDirty(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(dbParent(t), "mail.duckdb")
-	db, err := openWith(path, Options{}, func(ex execer) execer {
-		return ftsBlock{ex}
-	})
+	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,12 +299,11 @@ func TestFailedRebuildStaysDirty(t *testing.T) {
 	if err := db.UpsertMessages(ctx, []Message{sample("m1", at)}); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(SearchDir(path), []byte("not-a-dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.RebuildFTS(ctx); err == nil {
 		t.Fatal("expected rebuild fail")
-	}
-	dirty, ok, err := db.GetState(ctx, stateFTSDirty)
-	if err != nil || !ok || dirty != ftsDirtyValue {
-		t.Fatalf("dirty after fail %q %v %v", dirty, ok, err)
 	}
 	ready, err := db.HasFTS(ctx)
 	if err != nil || ready {
@@ -335,7 +333,7 @@ func assertMigratedV2(t *testing.T, db *DB) {
 	t.Helper()
 	ctx := context.Background()
 	v, ok, err := db.GetState(ctx, StateSchemaVersion)
-	if err != nil || !ok || v != "3" {
+	if err != nil || !ok || v != "4" {
 		t.Fatalf("version %q %v %v", v, ok, err)
 	}
 	phase, ok, err := db.GetState(ctx, "full_phase")

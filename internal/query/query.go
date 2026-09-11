@@ -36,6 +36,8 @@ type Envelope struct {
 	Phase            string       `json:"phase,omitempty"`
 	Processed        int          `json:"processed,omitempty"`
 	LastError        string       `json:"last_error,omitempty"`
+	StatusAsOf       string       `json:"status_as_of,omitempty"`
+	SearchIndexState string       `json:"search_index_state,omitempty"`
 	Messages         []Message    `json:"messages,omitzero"`
 	Message          *Message     `json:"message,omitempty"`
 	Schema           *Schema      `json:"schema,omitempty"`
@@ -241,9 +243,12 @@ func meta(ctx context.Context, db *store.DB) (Envelope, error) {
 		Total:        c.Total,
 		SearchCovers: c.SearchCovers(),
 	}
-	if ok, err := db.HasFTS(ctx); err == nil {
-		env.FTS = ok
+	if st, err := db.SearchIndexState(ctx); err == nil {
+		env.SearchIndexState = st
+		// fts remains a ready-index compatibility flag. Ranking is newest-first.
+		env.FTS = st == store.IndexStateReady
 	}
+	env.StatusAsOf = time.Now().UTC().Format(time.RFC3339Nano)
 	return env, nil
 }
 

@@ -4,8 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/search"
@@ -25,12 +26,20 @@ type execer interface {
 
 const searchTextSQL = `trim(concat_ws(' ', from_name, from_email, array_to_string(to_emails, ' '), array_to_string(cc_emails, ' '), subject, snippet, body))`
 
+// messageSelect projects list rows. Body stays empty so DuckDB can prune it.
 const messageSelect = `
-SELECT id, thread_id, history_id, internal_date,
-       from_name, from_email, to_json(to_emails)::VARCHAR, to_json(cc_emails)::VARCHAR,
-       subject, snippet, '', size_bytes, to_json(label_ids)::VARCHAR,
-       is_read, is_outgoing, is_deleted, has_body, body_fetched, synced_at
+SELECT messages.id, messages.thread_id, messages.history_id, messages.internal_date,
+       messages.from_name, messages.from_email, to_json(messages.to_emails)::VARCHAR, to_json(messages.cc_emails)::VARCHAR,
+       messages.subject, messages.snippet, '', messages.size_bytes, to_json(messages.label_ids)::VARCHAR,
+       messages.is_read, messages.is_outgoing, messages.is_deleted, messages.has_body, messages.body_fetched, messages.synced_at
 `
+
+// messageLookupCols are the typed columns messageSelect, filters, and order need.
+const messageLookupCols = `messages.id, messages.thread_id, messages.history_id, messages.internal_date,
+       messages.from_name, messages.from_email, messages.to_emails, messages.cc_emails,
+       messages.subject, messages.snippet, messages.size_bytes, messages.label_ids,
+       messages.is_read, messages.is_outgoing, messages.is_deleted, messages.has_body,
+       messages.body_fetched, messages.synced_at`
 
 type Message struct {
 	ID           string
@@ -101,8 +110,23 @@ func (c Coverage) SearchCovers() string {
 }
 
 type DB struct {
-	sql *sql.DB
-	mu  chan struct{}
+	sql           *sql.DB
+	writer        *sql.Conn
+	maint         *sql.Conn
+	mu            chan struct{}
+	path          string
+	spill         string
+	duckUI        bool
+	settingsReady atomic.Bool
+	idx           *searchCache
+	indexMu       sync.Mutex
+	maintCh       chan struct{}
+	maintWG       sync.WaitGroup
+	maintCancel   context.CancelFunc
+	maintStarted  atomic.Bool
+	building      atomic.Bool
+	IndexLog      func(string, ...any)
+	testHoldDuck  func()
 }
 
 func (d *DB) acquire(ctx context.Context) error {
@@ -120,117 +144,6 @@ func (d *DB) release() {
 
 type Options struct {
 	DuckUI bool
-}
-
-func Open(path string) (*DB, error) {
-	return OpenWith(path, Options{})
-}
-
-func OpenWith(path string, opt Options) (*DB, error) {
-	return openWith(path, opt, nil)
-}
-
-func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
-	path, spill, err := prepareOpen(path)
-	if err != nil {
-		return nil, err
-	}
-	sqldb, err := sql.Open("duckdb", path)
-	if err != nil {
-		return nil, err
-	}
-	sqldb.SetMaxOpenConns(1)
-	if err := applyTempSettings(sqldb, spill); err != nil {
-		_ = sqldb.Close()
-		return nil, err
-	}
-	db := &DB{sql: sqldb, mu: make(chan struct{}, 1)}
-	ctx := context.Background()
-	if err := db.rejectUnsupportedSchema(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if _, err := sqldb.Exec(schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("schema: %w", err)
-	}
-	if err := db.migrateSearch(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := db.migrateSchema(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if _, err := sqldb.Exec(schemaIndexes); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("schema indexes: %w", err)
-	}
-	var ex execer = sqldb
-	if wrap != nil {
-		ex = wrap(sqldb)
-	}
-	if err := bootstrapTrusted(ex, opt); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := db.lockSQL(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return db, nil
-}
-
-func applyTempSettings(db *sql.DB, spill string) error {
-	return execSet(db, "temp_directory", spill)
-}
-
-func execSet(db *sql.DB, name, value string) error {
-	q := "SET " + name + " = '" + strings.ReplaceAll(value, "'", "''") + "'"
-	if _, err := db.Exec(q); err != nil {
-		return fmt.Errorf("%s: %w", name, err)
-	}
-	return nil
-}
-
-func bootstrapTrusted(ex execer, opt Options) error {
-	_ = loadExtension(ex, "fts")
-	if opt.DuckUI {
-		if err := loadExtension(ex, "ui"); err != nil {
-			return fmt.Errorf("duckdb ui: %w", err)
-		}
-	}
-	return nil
-}
-
-func loadExtension(ex execer, name string) error {
-	ctx := context.Background()
-	if _, err := ex.ExecContext(ctx, "LOAD "+name); err == nil {
-		return nil
-	}
-	if _, err := ex.ExecContext(ctx, "INSTALL "+name); err != nil {
-		return err
-	}
-	_, err := ex.ExecContext(ctx, "LOAD "+name)
-	return err
-}
-
-func (d *DB) lockSQL() error {
-	if _, err := d.sql.Exec("SET enable_external_access = false"); err != nil {
-		return fmt.Errorf("enable_external_access: %w", err)
-	}
-	if _, err := d.sql.Exec("SET lock_configuration = true"); err != nil {
-		return fmt.Errorf("lock_configuration: %w", err)
-	}
-	return nil
-}
-
-func (d *DB) Close() error {
-	return d.sql.Close()
-}
-
-func (d *DB) SQL() *sql.DB {
-	return d.sql
 }
 
 const upsertMessageSQL = `
@@ -271,34 +184,39 @@ func (d *DB) UpsertMessages(ctx context.Context, msgs []Message) error {
 	if len(msgs) == 0 {
 		return nil
 	}
-	if err := d.acquire(ctx); err != nil {
-		return err
+	err := d.withTx(ctx, func(tx *sql.Tx) error {
+		return upsertMessagesTx(ctx, tx, msgs)
+	})
+	if err == nil {
+		d.notifyIndex()
 	}
-	defer d.release()
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := markFTSDirty(ctx, tx); err != nil {
-		return err
-	}
-	if err := upsertMessagesTx(ctx, tx, msgs); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return err
+}
+
+type searchStamp struct {
+	date    time.Time
+	deleted bool
 }
 
 func upsertMessagesTx(ctx context.Context, tx *sql.Tx, msgs []Message) error {
 	if len(msgs) == 0 {
 		return nil
 	}
+	ids := make([]string, 0, len(msgs))
+	byID := make(map[string]Message, len(msgs))
+	for _, m := range msgs {
+		ids = append(ids, m.ID)
+		byID[m.ID] = m
+	}
+	prev, err := loadSearchStamps(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
 	stmt, err := tx.PrepareContext(ctx, upsertMessageSQL)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
-	ids := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		var body any
 		if m.BodyFetched || m.HasBody {
@@ -326,9 +244,58 @@ func upsertMessagesTx(ctx context.Context, tx *sql.Tx, msgs []Message) error {
 		if err != nil {
 			return err
 		}
-		ids = append(ids, m.ID)
 	}
-	return refreshSearchTextTx(ctx, tx, ids)
+	stale, err := staleSearchIDs(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
+	if err := touchSearchTx(ctx, tx, stale); err != nil {
+		return err
+	}
+	touched := make(map[string]struct{}, len(stale))
+	for _, id := range stale {
+		touched[id] = struct{}{}
+	}
+	var revOnly []string
+	for _, id := range ids {
+		if _, ok := touched[id]; ok {
+			continue
+		}
+		was, ok := prev[id]
+		if !ok {
+			continue
+		}
+		cur := byID[id]
+		if !was.date.Equal(cur.InternalDate.UTC()) || was.deleted != cur.IsDeleted {
+			revOnly = append(revOnly, id)
+		}
+	}
+	return touchRevisionTx(ctx, tx, revOnly)
+}
+
+func loadSearchStamps(ctx context.Context, tx *sql.Tx, ids []string) (map[string]searchStamp, error) {
+	out := make(map[string]searchStamp, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var b strings.Builder
+	b.WriteString("SELECT id, internal_date, is_deleted FROM messages WHERE id IN ")
+	args := writeIn(&b, nil, ids)
+	rows, err := tx.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var st searchStamp
+		if err := rows.Scan(&id, &st.date, &st.deleted); err != nil {
+			return nil, err
+		}
+		st.date = st.date.UTC()
+		out[id] = st
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) GetMessage(ctx context.Context, id string) (Message, error) {
@@ -391,97 +358,13 @@ func (d *DB) ListMessages(ctx context.Context, f ListFilter) ([]Message, error) 
 		f.Before = q.Before
 	}
 
-	rank := false
-	if len(q.Terms) > 0 {
-		ok, err := d.hasFTS(ctx)
-		if err != nil {
-			return nil, err
-		}
-		rank = ok
-	}
-	msgs, err := d.listMessages(ctx, f, q, rank)
-	if err != nil && rank {
-		return d.listMessages(ctx, f, q, false)
-	}
-	return msgs, err
-}
-
-func (d *DB) listMessages(ctx context.Context, f ListFilter, q search.Query, useFTS bool) ([]Message, error) {
-	var b strings.Builder
-	args := make([]any, 0, 16)
-	b.WriteString(messageSelect)
-	b.WriteString("FROM messages\nWHERE NOT is_deleted\n")
-	if f.Unread {
-		b.WriteString(" AND NOT is_read")
-	}
-	if f.From != "" {
-		b.WriteString(" AND from_email = ?")
-		args = append(args, f.From)
-	}
-	if q.From != "" {
-		b.WriteString(" AND (from_email ILIKE ?" + likeEscape + " OR from_name ILIKE ?" + likeEscape + ")")
-		pat := likeContains(q.From)
-		args = append(args, pat, pat)
-	}
-	if q.To != "" {
-		b.WriteString(" AND (array_to_string(to_emails, ' ') ILIKE ?" + likeEscape + " OR array_to_string(cc_emails, ' ') ILIKE ?" + likeEscape + ")")
-		pat := likeContains(q.To)
-		args = append(args, pat, pat)
-	}
-	if q.Subject != "" {
-		b.WriteString(" AND subject ILIKE ?" + likeEscape)
-		args = append(args, likeContains(q.Subject))
-	}
-	if f.Label != "" {
-		b.WriteString(" AND list_contains(label_ids, ?)")
-		args = append(args, f.Label)
-	}
-	if !f.After.IsZero() {
-		b.WriteString(" AND internal_date >= ?")
-		args = append(args, f.After.UTC())
-	}
-	if !f.Before.IsZero() {
-		b.WriteString(" AND internal_date < ?")
-		args = append(args, f.Before.UTC())
-	}
-	for _, term := range q.Terms {
-		b.WriteString(" AND (")
-		b.WriteString(searchTextSQL)
-		b.WriteString(") ILIKE ?" + likeEscape)
-		args = append(args, likeContains(term))
-	}
-	searchPage := f.Query != ""
-	if !searchPage && !f.AfterDate.IsZero() && f.AfterID != "" {
-		b.WriteString(" AND (internal_date < ? OR (internal_date = ? AND id < ?))")
-		args = append(args, f.AfterDate.UTC(), f.AfterDate.UTC(), f.AfterID)
-	}
-	if useFTS && len(q.Terms) > 0 {
-		b.WriteString(" ORDER BY COALESCE(fts_main_messages.match_bm25(id, ?), 0) DESC, internal_date DESC, id DESC LIMIT ?")
-		args = append(args, strings.Join(q.Terms, " "), f.Limit)
-	} else {
-		b.WriteString(" ORDER BY internal_date DESC, id DESC LIMIT ?")
-		args = append(args, f.Limit)
-	}
-	if searchPage && f.Offset > 0 {
-		b.WriteString(" OFFSET ?")
-		args = append(args, f.Offset)
-	}
-
-	rows, err := d.sql.QueryContext(ctx, b.String(), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanMessages(rows)
+	return d.searchMessages(ctx, f, q)
 }
 
 func (d *DB) ResetSeen(ctx context.Context) error {
-	if err := d.acquire(ctx); err != nil {
-		return err
-	}
-	defer d.release()
-	_, err := d.sql.ExecContext(ctx, "DELETE FROM sync_seen")
-	return err
+	return d.withTx(ctx, func(tx *sql.Tx) error {
+		return resetSeenTx(ctx, tx)
+	})
 }
 
 func resetSeenTx(ctx context.Context, tx *sql.Tx) error {
@@ -493,19 +376,9 @@ func (d *DB) AddSeen(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	if err := d.acquire(ctx); err != nil {
-		return err
-	}
-	defer d.release()
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := addSeenTx(ctx, tx, ids); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return d.withTx(ctx, func(tx *sql.Tx) error {
+		return addSeenTx(ctx, tx, ids)
+	})
 }
 
 func addSeenTx(ctx context.Context, tx *sql.Tx, ids []string) error {
@@ -526,39 +399,38 @@ func addSeenTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 }
 
 func (d *DB) MarkMissingDeleted(ctx context.Context) (int64, error) {
-	if err := d.acquire(ctx); err != nil {
-		return 0, err
+	var n int64
+	err := d.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = markMissingDeletedTx(ctx, tx)
+		return err
+	})
+	if err == nil && n > 0 {
+		d.notifyIndex()
 	}
-	defer d.release()
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := markFTSDirty(ctx, tx); err != nil {
-		return 0, err
-	}
-	n, err := markMissingDeletedTx(ctx, tx)
-	if err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return n, nil
+	return n, err
 }
 
 func markMissingDeletedTx(ctx context.Context, tx *sql.Tx) (int64, error) {
-	res, err := tx.ExecContext(ctx, `
-UPDATE messages SET is_deleted = true
+	var n int64
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM messages
 WHERE NOT is_deleted AND id NOT IN (SELECT id FROM sync_seen)
-`)
-	if err != nil {
+`).Scan(&n); err != nil {
 		return 0, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
+	if n > 0 {
+		rev, err := nextCorpusTx(ctx, tx)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE messages
+SET is_deleted = true, search_revision = ?
+WHERE NOT is_deleted AND id NOT IN (SELECT id FROM sync_seen)
+`, rev); err != nil {
+			return 0, err
+		}
 	}
 	if err := resetSeenTx(ctx, tx); err != nil {
 		return n, err
@@ -570,63 +442,40 @@ func (d *DB) MarkDeleted(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	if err := d.acquire(ctx); err != nil {
-		return err
+	err := d.withTx(ctx, func(tx *sql.Tx) error {
+		return markDeletedTx(ctx, tx, ids)
+	})
+	if err == nil {
+		d.notifyIndex()
 	}
-	defer d.release()
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := markFTSDirty(ctx, tx); err != nil {
-		return err
-	}
-	if err := markDeletedTx(ctx, tx, ids); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return err
 }
 
 func markDeletedTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	stmt, err := tx.PrepareContext(ctx, "UPDATE messages SET is_deleted = true WHERE id = ?")
+	rev, err := nextCorpusTx(ctx, tx)
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
-	for _, id := range ids {
-		if _, err := stmt.ExecContext(ctx, id); err != nil {
-			return err
-		}
-	}
-	return nil
+	var b strings.Builder
+	b.WriteString("UPDATE messages SET is_deleted = true, search_revision = ? WHERE id IN ")
+	args := writeIn(&b, []any{rev}, ids)
+	_, err = tx.ExecContext(ctx, b.String(), args...)
+	return err
 }
 
 func (d *DB) UpdateLabels(ctx context.Context, id string, labels []string, isRead bool) error {
 	if labels == nil {
 		labels = []string{}
 	}
-	if err := d.acquire(ctx); err != nil {
-		return err
-	}
-	defer d.release()
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := markFTSDirty(ctx, tx); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `
+	return d.withTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
 UPDATE messages SET label_ids = `+listSQL+`, is_read = ? WHERE id = ?
-`, encodeList(labels), isRead, id); err != nil {
+`, encodeList(labels), isRead, id)
 		return err
-	}
-	return tx.Commit()
+	})
 }
 
 func (d *DB) MissingIDs(ctx context.Context, ids []string) ([]string, error) {
@@ -658,25 +507,22 @@ func (d *DB) UpsertLabels(ctx context.Context, labels []Label) error {
 	if len(labels) == 0 {
 		return nil
 	}
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	stmt, err := tx.PrepareContext(ctx, `
+	return d.withTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
 INSERT INTO labels(id, name, type) VALUES (?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET name = excluded.name, type = excluded.type
 `)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	for _, l := range labels {
-		if _, err := stmt.ExecContext(ctx, l.ID, l.Name, l.Type); err != nil {
+		if err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		defer stmt.Close()
+		for _, l := range labels {
+			if _, err := stmt.ExecContext(ctx, l.ID, l.Name, l.Type); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (d *DB) LabelMap(ctx context.Context) (map[string]string, error) {
@@ -697,8 +543,13 @@ func (d *DB) LabelMap(ctx context.Context) (map[string]string, error) {
 }
 
 func (d *DB) SetState(ctx context.Context, key, value string) error {
-	_, err := d.sql.ExecContext(ctx, setStateSQL, key, value)
-	return err
+	if d.writer == nil {
+		_, err := d.sql.ExecContext(ctx, setStateSQL, key, value)
+		return err
+	}
+	return d.withTx(ctx, func(tx *sql.Tx) error {
+		return setStateTx(ctx, tx, key, value)
+	})
 }
 
 const setStateSQL = `
@@ -724,8 +575,13 @@ func (d *DB) GetState(ctx context.Context, key string) (string, bool, error) {
 }
 
 func (d *DB) ClearState(ctx context.Context, key string) error {
-	_, err := d.sql.ExecContext(ctx, "DELETE FROM sync_state WHERE key = ?", key)
-	return err
+	if d.writer == nil {
+		_, err := d.sql.ExecContext(ctx, "DELETE FROM sync_state WHERE key = ?", key)
+		return err
+	}
+	return d.withTx(ctx, func(tx *sql.Tx) error {
+		return clearStateTx(ctx, tx, key)
+	})
 }
 
 func clearStateTx(ctx context.Context, tx *sql.Tx, key string) error {
