@@ -57,7 +57,10 @@ func TestMailboxPath(t *testing.T) {
 		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("GMAIL_BENCH_FIXTURE", filepath.Join(file, "bench.duckdb"))
+		// Child of a regular file: Unix Stat is ENOTDIR; Windows Stat is
+		// not-exist. A missing .duckdb path is accepted by MailboxPath, so
+		// use a non-.duckdb child that both platforms reject.
+		t.Setenv("GMAIL_BENCH_FIXTURE", filepath.Join(file, "child"))
 		_, provided, err := MailboxPath()
 		if err == nil || !provided {
 			t.Fatalf("provided=%t err=%v", provided, err)
