@@ -163,6 +163,74 @@ These inputs are validation errors: unsupported operators; empty or repeated sin
 
 Use the Unread chip for the same unread filter.
 
+## SQL recipes
+
+Use `search` for text and the operators above. Use `sql` for labels, threads, headers, arrays, and aggregates. Run each query with `gmail-to-duckdb sql --json '...'` or `gmail-to-duckdb sql --json < query.sql`.
+
+- Always add `WHERE NOT is_deleted`.
+- Always add `LIMIT`.
+- Do not `SELECT body`. Use `get --body` for one message.
+- To find fetch candidates, filter `NOT body_fetched` and use `get --body`.
+
+`search` unread includes Spam and Trash. This query is the usual inbox list:
+
+```sql
+SELECT id, thread_id, internal_date, from_email, subject, snippet
+FROM messages
+WHERE NOT is_deleted
+  AND NOT is_read
+  AND list_contains(label_ids, 'INBOX')
+  AND NOT list_contains(label_ids, 'SPAM')
+  AND NOT list_contains(label_ids, 'TRASH')
+  AND internal_date >= TIMESTAMP '2026-09-01'
+ORDER BY internal_date DESC, id DESC
+LIMIT 50
+```
+
+After `search` or `get` returns `thread_id`, load the thread:
+
+```sql
+SELECT id, internal_date, from_email, subject, snippet, is_outgoing
+FROM messages
+WHERE NOT is_deleted AND thread_id = 'THREAD_ID'
+ORDER BY internal_date, id
+```
+
+`label_ids` are Gmail ids (`Label_123`). Join `labels` for the name:
+
+```sql
+SELECT m.id, m.internal_date, m.from_email, m.subject, l.name AS label
+FROM messages m
+JOIN labels l ON list_contains(m.label_ids, l.id)
+WHERE NOT m.is_deleted AND l.name = 'Receipts'
+ORDER BY m.internal_date DESC, m.id DESC
+LIMIT 50
+```
+
+`to_emails` and `cc_emails` are arrays. `list_contains` matches an exact address. `to:` search is a substring:
+
+```sql
+SELECT id, internal_date, from_email, subject, to_emails, cc_emails
+FROM messages
+WHERE NOT is_deleted
+  AND (list_contains(to_emails, 'jane@example.com')
+    OR list_contains(cc_emails, 'jane@example.com'))
+ORDER BY internal_date DESC, id DESC
+LIMIT 50
+```
+
+Only `sql` returns `headers`. Use this for Reply-To, Message-ID, or List-Unsubscribe. `NULL` headers are not collected yet:
+
+```sql
+SELECT m.id, m.from_email, m.subject, h.value AS list_unsubscribe
+FROM messages m, UNNEST(CAST(m.headers AS STRUCT(name VARCHAR, value VARCHAR)[])) AS t(h)
+WHERE NOT m.is_deleted
+  AND m.headers IS NOT NULL
+  AND lower(h.name) = 'list-unsubscribe'
+ORDER BY m.internal_date DESC, m.id DESC
+LIMIT 50
+```
+
 ## Reports
 
 The Stats page runs the bundled SQL files. Existing size ranking stays. Three added reports:
