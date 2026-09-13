@@ -1,23 +1,23 @@
 class GmailToDuckdb < Formula
   desc "Sync Gmail into a local DuckDB file"
   homepage "https://github.com/ashwath-ramesh/gmail-to-duckdb"
-  version "0.3.0"
+  version "0.3.1"
 
   on_macos do
     on_arm do
-      url "https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/download/v0.3.0/gmail-to-duckdb-darwin-arm64.tar.gz"
-      sha256 "3d850264e5aab915caa15f83d39b36b880de2382e61f67f38a9892ecb2f825ba"
+      url "https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/download/v0.3.1/gmail-to-duckdb-darwin-arm64.tar.gz"
+      sha256 "573a1fbda9d49f3deafca53ca1cee6ce4cd79f2e91da9f534ab86f123ee873fd"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/download/v0.3.0/gmail-to-duckdb-linux-amd64.tar.gz"
-      sha256 "07a2ab643c08b6c1e60c8131513d2f456846a8875013d0daf23563fbd367f869"
+      url "https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/download/v0.3.1/gmail-to-duckdb-linux-amd64.tar.gz"
+      sha256 "42a0c1ec96656b076c5b83bd0bc66bee4b591826565522772e079dcc2abb907b"
     end
     on_arm do
-      url "https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/download/v0.3.0/gmail-to-duckdb-linux-arm64.tar.gz"
-      sha256 "c77c0d4dc1b23be976516108e4632eebf50c9ac09d330fdc2539e44b3817f19d"
+      url "https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/download/v0.3.1/gmail-to-duckdb-linux-arm64.tar.gz"
+      sha256 "cc353c21333c4676698a0d130ec33d01d5c6193252951f8d622aaae6c7777bcc"
     end
   end
 
