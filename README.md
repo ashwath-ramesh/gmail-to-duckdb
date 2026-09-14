@@ -21,6 +21,10 @@ Browse mail in the local UI. Agents and scripts use the `--json` commands.
 - Gmail History API and batch get
 - Metadata first. Bodies when you ask.
 
+## Performance
+
+On a 4-vCPU Ubuntu VM with a 2 GiB benchmark memory cap, common-term search across 70,000 synthetic messages took **136 ms median**. Initial indexing took **25 seconds**. See the [results and repeatable template](docs/performance.md).
+
 ## Install
 
 You do not need a Go toolchain for a normal install.
@@ -144,7 +148,7 @@ SQL defaults and write guards are in [docs/security.md](docs/security.md).
 
 Search uses case-insensitive literal substrings. All terms are AND. Quoted phrases are literal contiguous text. Quoted filter values work: `subject:"payment received"`. `%` and `_` are literal. Membership does not use stemming. Results are newest first (`internal_date DESC`, then `id DESC`).
 
-A disposable local SQLite trigram index (`*.duckdb.search`) selects candidates. DuckDB verifies every hit. Measured numbers, invariants, and reproduce steps are in [docs/performance.md](docs/performance.md). Index contents and file rules are in [docs/security.md](docs/security.md).
+A disposable local SQLite trigram index (`*.duckdb.search`) selects candidates. DuckDB verifies every hit. Measurements and reproduction steps are in [docs/performance.md](docs/performance.md); architecture notes are in [docs/performance-history.md](docs/performance-history.md). Index contents and file rules are in [docs/security.md](docs/security.md).
 
 Supported operators:
 
