@@ -16,7 +16,10 @@ Gmail to DuckDB copies your Gmail into one file on your computer. You can then s
 You need:
 
 - A Gmail account (an `@gmail.com` account, or a Google Workspace account that your administrator allows).
-- A computer with one of these systems: macOS on Apple silicon (M1 or later), Linux on x86-64 or ARM64, or Windows on x86-64. A Mac with an Intel processor needs version 0.3.2 or later, and the download steps below (not Homebrew).
+- A computer with one of these systems:
+  - macOS 12 or later, on Apple silicon or on an Intel processor. A Mac with an Intel processor needs version 0.4.1 or later.
+  - Linux on x86-64 or ARM64: Ubuntu 24.04, Debian 13, Fedora 39, or a newer version (glibc 2.38 or later).
+  - Windows 10 or later, on x86-64.
 - A terminal. On macOS, open **Terminal**. On Windows, open **PowerShell**. On Linux, open your terminal program.
 - Approximately 20 minutes.
 

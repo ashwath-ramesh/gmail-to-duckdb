@@ -107,7 +107,7 @@ If the index is missing or `fts` is false, literal substring search still works.
 
 ## Release files
 
-Each release archive has a `.sha256` file, and the release also has one `SHA256SUMS` file. A release from v0.3.2 on also has a signed build provenance attestation for each archive. GitHub Actions makes it with Sigstore. It proves that this repository's release workflow built the file from a given commit. To check one, install the [GitHub CLI](https://cli.github.com) and type:
+Each release archive has a `.sha256` file, and the release also has one `SHA256SUMS` file. A release from v0.4.0 on also has a signed build provenance attestation for each archive. GitHub Actions makes it with Sigstore. It proves that this repository's release workflow built the file from a given commit. To check one, install the [GitHub CLI](https://cli.github.com) and type:
 
 ```bash
 gh attestation verify gmail-to-duckdb-linux-amd64.tar.gz --repo ashwath-ramesh/gmail-to-duckdb

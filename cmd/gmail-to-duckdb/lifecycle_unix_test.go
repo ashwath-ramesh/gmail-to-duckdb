@@ -87,6 +87,14 @@ func TestCLIAfterServeKilledOrFrozen(t *testing.T) {
 	if err := cmd.Process.Signal(syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
+	// Signal returns before all threads of serve stop, and a running thread
+	// can still answer. Wait until the kernel reports the stop. With
+	// WUNTRACED, wait4 returns when the child stops or exits. Do not use
+	// ws.Stopped(): on BSD and macOS, Go returns false for a SIGSTOP stop.
+	var ws syscall.WaitStatus
+	if _, err := syscall.Wait4(cmd.Process.Pid, &ws, syscall.WUNTRACED, nil); err != nil || ws.Exited() || ws.Signaled() {
+		t.Fatalf("serve did not stop: %v (status %#x)", err, uint32(ws))
+	}
 	var out bytes.Buffer
 	err := run([]string{"gmail-to-duckdb", "status", "--db", dbPath}, strings.NewReader(""), &out, &out)
 	if err == nil || !strings.Contains(err.Error(), "still holds the database") {
