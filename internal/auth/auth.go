@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -104,7 +105,7 @@ func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) 
 	}
 	// oauth2 uses this client for the code exchange and for token refresh.
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: tokenRequestTimeout})
-	tok, err := loadToken(tokenPath)
+	tok, scope, err := loadToken(tokenPath)
 	if err != nil {
 		if !errors.Is(err, errNeedLogin) {
 			return nil, err
@@ -113,19 +114,24 @@ func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) 
 		if err != nil {
 			return nil, err
 		}
-		if err := saveToken(tokenPath, tok); err != nil {
+		scope = grantedScope(tok)
+		if err := checkScope(scope); err != nil {
+			return nil, err
+		}
+		if err := saveToken(tokenPath, tok, scope); err != nil {
 			return nil, err
 		}
 	}
-	src := &persistSource{src: cfg.TokenSource(ctx, tok), path: tokenPath}
+	src := &persistSource{src: cfg.TokenSource(ctx, tok), path: tokenPath, scope: scope}
 	hc := oauth2.NewClient(ctx, src)
 	hc.Timeout = apiRequestTimeout
 	return hc, nil
 }
 
 type persistSource struct {
-	src  oauth2.TokenSource
-	path string
+	src   oauth2.TokenSource
+	path  string
+	scope string
 }
 
 func (p *persistSource) Token() (*oauth2.Token, error) {
@@ -133,10 +139,28 @@ func (p *persistSource) Token() (*oauth2.Token, error) {
 	if err != nil {
 		return nil, wrapRefreshError(err)
 	}
-	if err := saveToken(p.path, tok); err != nil {
+	if s := grantedScope(tok); s != "" {
+		p.scope = s
+	}
+	if err := saveToken(p.path, tok, p.scope); err != nil {
 		return nil, err
 	}
 	return tok, nil
+}
+
+// grantedScope is the space-separated scope list from Google's token reply.
+func grantedScope(tok *oauth2.Token) string {
+	s, _ := tok.Extra("scope").(string)
+	return s
+}
+
+// checkScope rejects a sign-in where the user did not allow Gmail access.
+// An empty scope means that Google did not say, so it is accepted.
+func checkScope(scope string) error {
+	if scope == "" || slices.Contains(strings.Fields(scope), gmailapi.GmailReadonlyScope) {
+		return nil
+	}
+	return fmt.Errorf("Google did not give Gmail read access. Sign in again, and on the Google page keep the box that allows this app to read your email")
 }
 
 func wrapRefreshError(err error) error {
@@ -160,26 +184,33 @@ func isInvalidGrant(err error) bool {
 	return json.Unmarshal(re.Body, &payload) == nil && payload.Error == "invalid_grant"
 }
 
-func loadToken(path string) (*oauth2.Token, error) {
+// storedToken is the token file: the oauth2 token plus the granted scope,
+// which oauth2.Token does not keep.
+type storedToken struct {
+	oauth2.Token
+	Scope string `json:"scope,omitempty"`
+}
+
+func loadToken(path string) (*oauth2.Token, string, error) {
 	b, err := privfile.Read(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, errNeedLogin
+			return nil, "", errNeedLogin
 		}
-		return nil, err
+		return nil, "", err
 	}
-	var tok oauth2.Token
-	if err := json.Unmarshal(b, &tok); err != nil {
-		return nil, errNeedLogin
+	var st storedToken
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, "", errNeedLogin
 	}
-	if !tok.Valid() && tok.RefreshToken == "" {
-		return nil, errNeedLogin
+	if !st.Valid() && st.RefreshToken == "" {
+		return nil, "", errNeedLogin
 	}
-	return &tok, nil
+	return &st.Token, st.Scope, nil
 }
 
-func saveToken(path string, tok *oauth2.Token) error {
-	b, err := json.MarshalIndent(tok, "", "  ")
+func saveToken(path string, tok *oauth2.Token, scope string) error {
+	b, err := json.MarshalIndent(storedToken{Token: *tok, Scope: scope}, "", "  ")
 	if err != nil {
 		return err
 	}

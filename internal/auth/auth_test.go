@@ -26,7 +26,7 @@ func TestTokenPath(t *testing.T) {
 
 func TestWriteTokenMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mail.token.json")
-	if err := saveToken(path, &oauth2.Token{AccessToken: "x", RefreshToken: "r"}); err != nil {
+	if err := saveToken(path, &oauth2.Token{AccessToken: "x", RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	assertPrivateFile(t, path)
@@ -44,7 +44,7 @@ func TestSaveTokenReplacesPermissiveFile(t *testing.T) {
 	if err := makePermissive(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}); err != nil {
+	if err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	assertPrivateFile(t, path)
@@ -164,7 +164,7 @@ func TestSaveTokenRejectsSymlink(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		skipIfNoSymlink(t, err)
 	}
-	if err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}); err == nil {
+	if err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}, ""); err == nil {
 		t.Fatal("expected symlink reject")
 	}
 	got, err := os.ReadFile(target)
@@ -186,27 +186,27 @@ func TestLoadTokenRejectsSymlink(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		skipIfNoSymlink(t, err)
 	}
-	if _, err := loadToken(path); err == nil {
+	if _, _, err := loadToken(path); err == nil {
 		t.Fatal("expected symlink reject")
 	}
 }
 
 func TestLoadTokenNeedLogin(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.token.json")
-	if _, err := loadToken(missing); !errors.Is(err, errNeedLogin) {
+	if _, _, err := loadToken(missing); !errors.Is(err, errNeedLogin) {
 		t.Fatalf("missing: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "mail.token.json")
-	if err := saveToken(path, &oauth2.Token{}); err != nil {
+	if err := saveToken(path, &oauth2.Token{}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadToken(path); !errors.Is(err, errNeedLogin) {
+	if _, _, err := loadToken(path); !errors.Is(err, errNeedLogin) {
 		t.Fatalf("expired: %v", err)
 	}
 	if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadToken(path); !errors.Is(err, errNeedLogin) {
+	if _, _, err := loadToken(path); !errors.Is(err, errNeedLogin) {
 		t.Fatalf("invalid: %v", err)
 	}
 }
@@ -221,7 +221,7 @@ func TestLoadTokenPrivacyError(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		skipIfNoSymlink(t, err)
 	}
-	_, err := loadToken(path)
+	_, _, err := loadToken(path)
 	if err == nil {
 		t.Fatal("expected privacy error")
 	}
@@ -280,7 +280,7 @@ func TestHTTPClientReauthsExpiredToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	tokPath := filepath.Join(dir, "mail.token.json")
-	if err := saveToken(tokPath, &oauth2.Token{AccessToken: "x", Expiry: time.Now().Add(-time.Hour)}); err != nil {
+	if err := saveToken(tokPath, &oauth2.Token{AccessToken: "x", Expiry: time.Now().Add(-time.Hour)}, ""); err != nil {
 		t.Fatal(err)
 	}
 	port := heldPort(t)
@@ -305,7 +305,7 @@ func TestHTTPClientTightensCopiedCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	tokPath := filepath.Join(dir, "mail.token.json")
-	if err := saveToken(tokPath, &oauth2.Token{RefreshToken: "r"}); err != nil {
+	if err := saveToken(tokPath, &oauth2.Token{RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := HTTPClient(context.Background(), cred, tokPath, 41807); err != nil {
@@ -317,14 +317,14 @@ func TestHTTPClientTightensCopiedCredentials(t *testing.T) {
 func TestFailedTokenReplaceLeavesPriorData(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mail.token.json")
-	if err := saveToken(path, &oauth2.Token{AccessToken: "old", RefreshToken: "r"}); err != nil {
+	if err := saveToken(path, &oauth2.Token{AccessToken: "old", RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := makeDirNotCreatable(dir); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = restoreDirCreatable(dir) })
-	err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"})
+	err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}, "")
 	if err == nil {
 		t.Fatal("expected replace failure")
 	}
@@ -403,5 +403,45 @@ func TestCheckDesktopClient(t *testing.T) {
 		if err := CheckDesktopClient([]byte(bad)); err == nil {
 			t.Fatalf("accepted %s", bad)
 		}
+	}
+}
+
+func TestTokenFileKeepsGrantedScope(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mail.token.json")
+	scope := "https://www.googleapis.com/auth/gmail.readonly openid"
+	if err := saveToken(path, &oauth2.Token{AccessToken: "a", RefreshToken: "r"}, scope); err != nil {
+		t.Fatal(err)
+	}
+	tok, got, err := loadToken(path)
+	if err != nil || got != scope || tok.RefreshToken != "r" {
+		t.Fatalf("tok %+v scope %q err %v", tok, got, err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Scope        string `json:"scope"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil || doc.Scope != scope || doc.RefreshToken != "r" {
+		t.Fatalf("file %s", raw)
+	}
+}
+
+func TestCheckScope(t *testing.T) {
+	for _, ok := range []string{"", "https://www.googleapis.com/auth/gmail.readonly", "openid https://www.googleapis.com/auth/gmail.readonly"} {
+		if err := checkScope(ok); err != nil {
+			t.Fatalf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"openid email", "https://www.googleapis.com/auth/gmail.readonlyX"} {
+		if err := checkScope(bad); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+	tok := (&oauth2.Token{AccessToken: "a"}).WithExtra(map[string]any{"scope": "openid"})
+	if grantedScope(tok) != "openid" {
+		t.Fatalf("scope %q", grantedScope(tok))
 	}
 }

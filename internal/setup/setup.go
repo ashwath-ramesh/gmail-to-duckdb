@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -226,12 +227,16 @@ func checkToken(path string) query.Check {
 		c.Detail = "missing refresh_token"
 		return c
 	}
-	if tok.Scope != "" && !strings.Contains(tok.Scope, gmailapi.GmailReadonlyScope) {
-		c.Detail = "token scope lacks gmail.readonly"
+	if tok.Scope != "" && !slices.Contains(strings.Fields(tok.Scope), gmailapi.GmailReadonlyScope) {
+		c.Detail = "token scope lacks gmail.readonly; remove the token file and sign in again"
 		return c
 	}
+	scope := "gmail.readonly granted"
+	if tok.Scope == "" {
+		scope = "scope not recorded (token from an older version)"
+	}
 	c.OK = true
-	c.Detail = path + " (local check only: presence, shape, and scope; cannot prove Google will refresh this token)"
+	c.Detail = path + " (local check of presence, shape, and scope: " + scope + "; it cannot prove that Google will refresh this token)"
 	return c
 }
 
