@@ -15,7 +15,8 @@ import (
 const (
 	indexBatchMsgs    = 256
 	indexBatchBytes   = 8 << 20
-	indexCatchupEvery = 2 * time.Second
+	// Every write calls notifyIndex. The tick only retries after an error.
+	indexCatchupEvery = 15 * time.Second
 )
 
 func (d *DB) StartMaintenance(ctx context.Context) {

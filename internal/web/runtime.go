@@ -89,18 +89,30 @@ func (s *Server) StopStatus() {
 
 func (s *Server) statusLoop(ctx context.Context) {
 	defer s.rt.wg.Done()
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
 	s.refreshStatus(ctx)
 	for {
+		t := time.NewTimer(s.statusEvery())
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-s.rt.wake:
-		case <-tick.C:
+			t.Stop()
+		case <-t.C:
 		}
 		s.refreshStatus(ctx)
 	}
+}
+
+// statusEvery refreshes the cached status each second while a sync runs.
+// When idle, changes wake the loop, so a slow fallback is enough.
+func (s *Server) statusEvery() time.Duration {
+	s.rt.mu.Lock()
+	defer s.rt.mu.Unlock()
+	if s.rt.running {
+		return time.Second
+	}
+	return 15 * time.Second
 }
 
 func (s *Server) wakeStatus() {
