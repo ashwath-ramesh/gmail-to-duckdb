@@ -202,9 +202,14 @@ async function openMsg(id, row) {
   }
   let body;
   if (m.has_body && m.is_html) {
-    body = document.createElement("div");
+    // The server already sanitizes the HTML. The sandbox (no scripts, no forms,
+    // opaque origin) is a second wall: email HTML never runs in this page.
+    body = document.createElement("iframe");
     body.className = "body-html";
-    body.innerHTML = text;
+    body.title = "Message body";
+    body.setAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
+    body.setAttribute("referrerpolicy", "no-referrer");
+    body.srcdoc = '<!doctype html><meta charset="utf-8"><base target="_blank"><style>body{font-family:sans-serif;overflow-wrap:anywhere}img,table{max-width:100%;height:auto}</style>' + text;
   } else {
     body = document.createElement("pre");
     body.textContent = text;

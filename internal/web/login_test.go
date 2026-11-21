@@ -165,3 +165,19 @@ func TestWriteLauncherIsPrivateAndEscaped(t *testing.T) {
 		t.Fatalf("launcher still present: %v", err)
 	}
 }
+
+func TestHTMLBodyRendersInSandbox(t *testing.T) {
+	b, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(b)
+	if !strings.Contains(js, `setAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox")`) || !strings.Contains(js, "srcdoc") {
+		t.Fatal("HTML body must render in a sandboxed srcdoc iframe")
+	}
+	for _, bad := range []string{"body.innerHTML", "allow-scripts", "allow-same-origin", "allow-forms", "document.cookie"} {
+		if strings.Contains(js, bad) {
+			t.Fatalf("app.js must not contain %q", bad)
+		}
+	}
+}

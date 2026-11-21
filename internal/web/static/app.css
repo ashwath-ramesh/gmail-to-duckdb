@@ -105,15 +105,11 @@ main {
   word-break: break-word;
 }
 .body-html {
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  max-width: 100%;
-}
-.body-html img,
-.body-html table {
-  max-width: 100%;
-  height: auto;
+  display: block;
+  width: 100%;
+  height: 70vh;
+  border: 0;
+  background: #fff;
 }
 .meta { color: #888; white-space: normal; }
 #cards { display: grid; gap: 1.25rem; }
