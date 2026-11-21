@@ -5,9 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -349,12 +351,10 @@ func TestHistoryAddDeleteLabel(t *testing.T) {
 		t.Fatal(err)
 	}
 	api.historyPages = []gmail.HistoryPage{{
-		Added:   []string{"new"},
-		Deleted: []string{"del"},
-		LabelUpdates: []gmail.LabelUpdate{{
-			ID: "exist", Labels: []string{"INBOX"},
-		}},
-		HistoryID: 20,
+		Added:        []string{"new"},
+		Deleted:      []string{"del"},
+		LabelChanged: []string{"exist"},
+		HistoryID:    20,
 	}}
 	api.raw["new"] = rawMsg("new", "n@x.com", "N", true, "")
 	api.raw["exist"] = rawMsg("exist", "e@x.com", "E", false, "")
@@ -501,5 +501,28 @@ func TestListCheckpointOnCancel(t *testing.T) {
 	tok, ok, err := db.GetState(context.Background(), stateListPage)
 	if err != nil || !ok || tok == "" {
 		t.Fatalf("token %q %v %v", tok, ok, err)
+	}
+}
+
+func TestUnparseableMetadataIsSkipped(t *testing.T) {
+	ctx := context.Background()
+	db, r, api := openTest(t)
+	var logs []string
+	r.Log = func(format string, a ...any) { logs = append(logs, fmt.Sprintf(format, a...)) }
+	api.listPages = [][]string{{"a", "bad"}}
+	api.raw["a"] = rawMsg("a", "a@x.com", "A", true, "")
+	api.raw["bad"] = []byte(`{"id":"bad","threadId":"t","labelIds":"not-a-list"}`)
+	if err := r.Sync(ctx, Options{}); err != nil {
+		t.Fatalf("one bad message must not stop sync: %v", err)
+	}
+	if _, err := db.GetMessage(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if hid, ok, err := db.GetState(ctx, stateHistoryID); err != nil || !ok || hid != "100" {
+		t.Fatalf("sync did not finish: %q %v %v", hid, ok, err)
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "skip message bad") || !strings.Contains(joined, "skipped 1 messages") {
+		t.Fatalf("logs %q", joined)
 	}
 }

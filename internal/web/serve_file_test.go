@@ -19,6 +19,10 @@ func TestServeFileRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got.DB != dbPath {
+		t.Fatalf("db %q want %q", got.DB, dbPath)
+	}
+	got.DB = ""
 	if got != info {
 		t.Fatalf("%+v", got)
 	}
@@ -58,6 +62,10 @@ func TestWriteServeFileReplacesPermissiveFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got.DB != dbPath {
+		t.Fatalf("db %q want %q", got.DB, dbPath)
+	}
+	got.DB = ""
 	if got != info {
 		t.Fatalf("%+v", got)
 	}
@@ -127,6 +135,7 @@ func TestFailedServeReplaceLeavesPriorData(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatalf("prior json lost: %v", err)
 	}
+	got.DB = ""
 	if got != old {
 		t.Fatalf("prior data lost: %+v", got)
 	}

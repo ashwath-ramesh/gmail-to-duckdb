@@ -4,36 +4,33 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 )
 
-var usage = `gmail-to-duckdb — sync Gmail into a local DuckDB file
+var usage = `gmail-to-duckdb — copy Gmail into a local DuckDB file and search it
 
 Commands:
-  init [--credentials PATH]   Write a stable config
+  init --credentials PATH     Save your Google sign-in file and a config
+  serve [--sync-every 5m]     Sign in, sync, and open the mail page
+  ui                          Open the mail page of the running serve
   doctor [--json] [--port N]  Check setup
-  serve [--sync-every 5m]     UI, status, and optional scheduled sync
-  ui [--port 8080]            Same process as serve (no startup sync)
-  sync [--full] [--bodies]    Incremental metadata sync
+  sync [--full] [--bodies]    Sync once (--bodies downloads message text)
   status [--json]             Sync and coverage status
-  search QUERY [--json]       Search messages
-  get MESSAGE_ID [--body]     Fetch one message
+  search QUERY [--json]       Search messages (50 results at most)
+  get MESSAGE_ID [--body]     Show one message (--body: stored text only)
   schema [--json]             Database schema
   sql [--write] [--json]      Run SQL (read-only; --write is database-only)
 
 Flags (most commands):
   --db PATH            DuckDB file (default mail.duckdb)
   --credentials PATH   OAuth client JSON (default credentials.json)
-  --oauth-port N       OAuth callback port (default ` + itoa(auth.DefaultOAuthPort) + `)
+  --oauth-port N       OAuth callback port (default ` + strconv.Itoa(auth.DefaultOAuthPort) + `)
+  --port N             Mail page port (serve, ui, doctor; default 8080)
   --json               Machine-readable envelope
-  --duckdb-ui          Allow DuckDB UI on loopback (serve/ui)
 `
-
-func itoa(n int) string {
-	return fmt.Sprintf("%d", n)
-}
 
 func main() {
 	privfile.LockDownProcess()

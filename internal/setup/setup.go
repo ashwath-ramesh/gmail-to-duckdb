@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -50,7 +51,7 @@ func Init(credSrc, dbPath string) (config.Config, error) {
 	if err != nil {
 		return config.Config{}, err
 	}
-	if err := checkDesktopCreds(raw); err != nil {
+	if err := auth.CheckDesktopClient(raw); err != nil {
 		return config.Config{}, err
 	}
 	if err := privfile.MkdirPrivate(config.Dir()); err != nil {
@@ -72,6 +73,10 @@ func Init(credSrc, dbPath string) (config.Config, error) {
 	if dbPath == "" {
 		dbPath = filepath.Join(config.DataDir(), "mail.duckdb")
 	}
+	// Save an absolute path: a relative one would pick a different mailbox in each directory.
+	if dbPath, err = filepath.Abs(config.Expand(dbPath)); err != nil {
+		return config.Config{}, err
+	}
 	cfg := config.Config{
 		DB:          dbPath,
 		Credentials: dest,
@@ -86,57 +91,74 @@ func Init(credSrc, dbPath string) (config.Config, error) {
 
 func Doctor(ctx context.Context, cfg config.Config) query.Envelope {
 	env := query.Envelope{SchemaVersion: store.SchemaVersion}
-	env.Checks = append(env.Checks, checkCredentials(cfg.Credentials))
-	env.Checks = append(env.Checks, checkToken(auth.TokenPath(cfg.DB)))
-	if info, err := web.ReadServeFile(cfg.DB); err == nil {
+	env.Checks = append(env.Checks, checkCredentials(cfg.Credentials), checkToken(auth.TokenPath(cfg.DB)))
+	serve := query.Check{Name: "serve", OK: true, Detail: "serve not running"}
+	info, err := web.ReadServeFile(cfg.DB)
+	switch {
+	case err != nil && !os.IsNotExist(err):
+		serve = query.Check{Name: "serve", Detail: "serve file present but unreadable: " + err.Error()}
+		env.Checks = append(env.Checks,
+			query.Check{Name: "database", Detail: "serve file present but unreadable: " + err.Error()},
+			query.Check{Name: "fts", Detail: "serve file unreadable"})
+	case err == nil:
 		if u, err := url.Parse(info.URL); err == nil && u.Port() != "" {
 			cfg.Port = u.Port()
 		}
-		if c, err := web.Dial(cfg.DB); err == nil {
-			defer c.Close()
+		c, dialErr := web.Dial(cfg.DB)
+		if dialErr == nil {
+			serve.Detail = "serve reachable"
 			if st, err := c.Status(ctx); err == nil {
-				env.LastSync = st.LastSync
-				env.BodyCoverage = st.BodyCoverage
-				env.SchemaVersion = st.SchemaVersion
-				env.LastError = st.LastError
-				env.Checks = append(env.Checks, query.Check{Name: "database", OK: true, Detail: "owned by serve"})
-				env.Checks = append(env.Checks, query.Check{Name: "fts", OK: true, Detail: ftsDetail(st.FTS)})
+				copyStatus(&env, st)
+				env.Checks = append(env.Checks,
+					query.Check{Name: "database", OK: true, Detail: "owned by serve"},
+					query.Check{Name: "fts", OK: true, Detail: ftsDetail(st.FTS)})
 			} else {
-				env.Checks = append(env.Checks, query.Check{Name: "database", OK: false, Detail: err.Error()})
-				env.Checks = append(env.Checks, query.Check{Name: "fts", OK: false, Detail: "serve status failed"})
+				env.Checks = append(env.Checks,
+					query.Check{Name: "database", Detail: err.Error()},
+					query.Check{Name: "fts", Detail: "serve status failed"})
 			}
-		} else {
-			env.Checks = append(env.Checks, query.Check{Name: "database", OK: false, Detail: "serve is marked running but not reachable: " + err.Error()})
-			env.Checks = append(env.Checks, query.Check{Name: "fts", OK: false, Detail: "database owned by unreachable serve"})
+			break
 		}
-	} else if !os.IsNotExist(err) {
-		env.Checks = append(env.Checks, query.Check{Name: "database", OK: false, Detail: "serve file present but unreadable: " + err.Error()})
-		env.Checks = append(env.Checks, query.Check{Name: "fts", OK: false, Detail: "serve file unreadable"})
-	} else {
-		dbCheck, db := checkDB(cfg.DB)
-		env.Checks = append(env.Checks, dbCheck)
-		if db != nil {
-			defer db.Close()
-			if e, err := query.Status(ctx, db); err == nil {
-				env.LastSync = e.LastSync
-				env.BodyCoverage = e.BodyCoverage
-				env.SchemaVersion = e.SchemaVersion
-				env.LastError = e.LastError
-			}
-			env.Checks = append(env.Checks, checkFTS(ctx, db))
+		// serve does not answer. The DuckDB lock tells if it is still alive.
+		if localChecks(ctx, &env, cfg.DB) {
+			serve.Detail = "stale serve file from a serve that stopped; the next command removes it"
 		} else {
-			env.Checks = append(env.Checks, query.Check{Name: "fts", OK: false, Detail: "database not open"})
+			serve = query.Check{Name: "serve", Detail: fmt.Sprintf("serve (pid %d) does not answer at %s: %v", info.PID, info.URL, dialErr)}
 		}
+	default:
+		localChecks(ctx, &env, cfg.DB)
 	}
 	env.Checks = append(env.Checks, checkPort("oauth_port", cfg.OAuthPort, cfg.DB))
 	port := 8080
 	if n, err := strconv.Atoi(cfg.Port); err == nil {
 		port = n
 	}
-	env.Checks = append(env.Checks, checkPort("ui_port", port, cfg.DB))
-	env.Checks = append(env.Checks, checkServe(cfg.DB))
+	env.Checks = append(env.Checks, checkPort("ui_port", port, cfg.DB), serve)
 	env.ResultCount = len(env.Checks)
 	return env
+}
+
+// localChecks opens the database directly. It reports false if the open fails.
+func localChecks(ctx context.Context, env *query.Envelope, dbPath string) bool {
+	dbCheck, db := checkDB(dbPath)
+	env.Checks = append(env.Checks, dbCheck)
+	if db == nil {
+		env.Checks = append(env.Checks, query.Check{Name: "fts", Pending: dbCheck.Pending, Detail: "database not open"})
+		return dbCheck.Pending
+	}
+	defer db.Close()
+	if st, err := query.Status(ctx, db); err == nil {
+		copyStatus(env, st)
+	}
+	env.Checks = append(env.Checks, checkFTS(ctx, db))
+	return true
+}
+
+func copyStatus(env *query.Envelope, st query.Envelope) {
+	env.LastSync = st.LastSync
+	env.BodyCoverage = st.BodyCoverage
+	env.SchemaVersion = st.SchemaVersion
+	env.LastError = st.LastError
 }
 
 func ftsDetail(ok bool) string {
@@ -146,9 +168,11 @@ func ftsDetail(ok bool) string {
 	return "search index pending; literal search works"
 }
 
+// DoctorOK is true when no check failed. A pending check (no sign-in or no
+// mailbox yet) is not a failure: the first serve creates both.
 func DoctorOK(env query.Envelope) bool {
 	for _, c := range env.Checks {
-		if !c.OK {
+		if !c.OK && !c.Pending {
 			return false
 		}
 	}
@@ -159,17 +183,6 @@ func PrintSteps(w io.Writer) {
 	fmt.Fprint(w, SetupSteps)
 }
 
-func checkDesktopCreds(raw []byte) error {
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("credentials JSON: %w", err)
-	}
-	if _, ok := doc["installed"]; !ok {
-		return fmt.Errorf("credentials must be a Desktop app client (key \"installed\")")
-	}
-	return nil
-}
-
 func checkCredentials(path string) query.Check {
 	c := query.Check{Name: "credentials"}
 	raw, err := os.ReadFile(path)
@@ -177,7 +190,7 @@ func checkCredentials(path string) query.Check {
 		c.Detail = err.Error()
 		return c
 	}
-	if err := checkDesktopCreds(raw); err != nil {
+	if err := auth.CheckDesktopClient(raw); err != nil {
 		c.Detail = err.Error()
 		return c
 	}
@@ -188,6 +201,11 @@ func checkCredentials(path string) query.Check {
 
 func checkToken(path string) query.Check {
 	c := query.Check{Name: "token"}
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		c.Pending = true
+		c.Detail = "not signed in yet; run gmail-to-duckdb serve to sign in"
+		return c
+	}
 	if err := privfile.Check(path); err != nil {
 		c.Detail = err.Error()
 		return c
@@ -209,18 +227,27 @@ func checkToken(path string) query.Check {
 		c.Detail = "missing refresh_token"
 		return c
 	}
-	if tok.Scope != "" && !strings.Contains(tok.Scope, gmailapi.GmailReadonlyScope) {
-		c.Detail = "token scope lacks gmail.readonly"
+	if tok.Scope != "" && !slices.Contains(strings.Fields(tok.Scope), gmailapi.GmailReadonlyScope) {
+		c.Detail = "token scope lacks gmail.readonly; remove the token file and sign in again"
 		return c
 	}
+	scope := "gmail.readonly granted"
+	if tok.Scope == "" {
+		scope = "scope not recorded (token from an older version)"
+	}
 	c.OK = true
-	c.Detail = path + " (local check only: presence, shape, and scope; cannot prove Google will refresh this token)"
+	c.Detail = path + " (local check of presence, shape, and scope: " + scope + "; it cannot prove that Google will refresh this token)"
 	return c
 }
 
 func checkDB(path string) (query.Check, *store.DB) {
 	c := query.Check{Name: "database"}
 	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			c.Pending = true
+			c.Detail = "no mailbox yet; the first serve or sync creates " + path
+			return c, nil
+		}
 		c.Detail = err.Error()
 		return c, nil
 	}
@@ -270,24 +297,4 @@ func serveUsesPort(info web.ServeInfo, port int) bool {
 	}
 	n, err := strconv.Atoi(u.Port())
 	return err == nil && n == port && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost")
-}
-
-func checkServe(dbPath string) query.Check {
-	c := query.Check{Name: "serve"}
-	if _, err := web.ReadServeFile(dbPath); err != nil {
-		if os.IsNotExist(err) {
-			c.OK = true
-			c.Detail = "serve not running"
-			return c
-		}
-		c.Detail = "serve file present but unreadable: " + err.Error()
-		return c
-	}
-	if _, err := web.Dial(dbPath); err != nil {
-		c.Detail = "serve file present but not reachable: " + err.Error()
-		return c
-	}
-	c.OK = true
-	c.Detail = "serve reachable"
-	return c
 }

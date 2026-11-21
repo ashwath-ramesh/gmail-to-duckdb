@@ -5,12 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"time"
 
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/config"
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/gmail"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/openurl"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	mailsync "github.com/ashwath-ramesh/gmail-to-duckdb/internal/sync"
@@ -19,12 +15,17 @@ import (
 
 func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	cf := globalFlags("serve")
-	cfg := config.Load()
-	port := cf.fs.String("port", cfg.Port, "local port")
+	port := cf.fs.String("port", cf.cfg.Port, "local port")
 	every := cf.fs.String("sync-every", "", "incremental sync interval (e.g. 5m)")
-	duckUI := cf.fs.Bool("duckdb-ui", false, "allow unauthenticated DuckDB UI on loopback")
-	if err := parseFlags(cf.fs, args); err != nil {
+	if err := cf.parse(args); err != nil {
 		return err
+	}
+	if !asServe {
+		if c, err := web.Dial(*cf.db); err == nil {
+			return openUI(stdout, stderr, *cf.db, func() (string, error) {
+				return c.LoginLink(context.Background())
+			})
+		}
 	}
 	var interval time.Duration
 	if *every != "" {
@@ -34,10 +35,10 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 		}
 		interval = d
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signalContext()
 	defer stop()
 
-	db, err := store.OpenWith(*cf.db, store.Options{DuckUI: *duckUI})
+	db, err := store.Open(*cf.db)
 	if err != nil {
 		return err
 	}
@@ -48,24 +49,28 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	s := &web.Server{DB: db, Token: tok, SyncCtx: ctx, AllowDuckUI: *duckUI}
-	if hc, err := auth.HTTPClient(ctx, *cf.creds, auth.TokenPath(*cf.db), *cf.oauthPort); err == nil {
-		if api, err := gmail.New(ctx, hc); err == nil {
-			s.FetchBody = func(ctx context.Context, id string) error {
-				return mailsync.FetchOnDemand(ctx, db, api, id)
+	s := &web.Server{DB: db, Token: tok, SyncCtx: ctx}
+	// Runs before db.Close: stop the work, then wait for a running sync to end.
+	defer func() {
+		stop()
+		s.WaitIdle()
+	}()
+	if api, err := gmailAPI(ctx, *cf.creds, *cf.db, *cf.oauthPort); err == nil {
+		s.FetchBody = func(ctx context.Context, id string) error {
+			return mailsync.FetchOnDemand(ctx, db, api, id)
+		}
+		s.Sync = func(ctx context.Context, opt mailsync.Options) error {
+			r := &mailsync.Runner{
+				DB:         db,
+				API:        api,
+				Log:        func(format string, a ...any) { writeDiag(stderr, fmt.Sprintf(format, a...)) },
+				OnProgress: s.SetProgress,
 			}
-			s.Sync = func(ctx context.Context, opt mailsync.Options) error {
-				r := &mailsync.Runner{
-					DB:         db,
-					API:        api,
-					Log:        func(format string, a ...any) { writeDiag(stderr, fmt.Sprintf(format, a...)) },
-					OnProgress: s.SetProgress,
-				}
-				return r.Sync(ctx, opt)
-			}
+			return r.Sync(ctx, opt)
 		}
 	} else {
-		writeDiag(stderr, fmt.Sprintf("gmail client disabled: %v", err))
+		s.NoSyncReason = "Gmail sign-in failed: " + err.Error()
+		writeDiag(stderr, "sync is off: "+s.NoSyncReason)
 	}
 
 	ln, err := web.Listen(*port)
@@ -84,8 +89,14 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer func() { _ = web.RemoveServeFile(*cf.db) }()
+	defer func() { _ = web.RemoveLauncher(*cf.db) }()
 	fmt.Fprintln(stdout, "listening on", listenURL)
-	_ = openurl.Open(listenURL)
+	if err := openUI(stdout, stderr, *cf.db, func() (string, error) {
+		code, err := s.NewLoginCode()
+		return web.LoginLink(listenURL, code), err
+	}); err != nil {
+		writeDiag(stderr, fmt.Sprintf("open UI: %v", err))
+	}
 	s.StartStatus(ctx)
 	defer s.StopStatus()
 	db.StartMaintenance(ctx)
@@ -114,4 +125,22 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	}
 
 	return <-errc
+}
+
+// openUI prints a one-time login link and opens it in the browser through a
+// private launcher file, so the code does not appear in process arguments.
+func openUI(stdout, stderr io.Writer, dbPath string, link func() (string, error)) error {
+	l, err := link()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "open the UI (this link works once, for 2 minutes):", l)
+	path, err := web.WriteLauncher(dbPath, l)
+	if err != nil {
+		return err
+	}
+	if err := openurl.Open(path); err != nil {
+		writeDiag(stderr, fmt.Sprintf("could not open a browser: %v", err))
+	}
+	return nil
 }

@@ -37,18 +37,18 @@ func cmdInit(args []string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "wrote %s\n", termtext.SingleLine(config.Path()))
 	fmt.Fprintf(stdout, "credentials %s\n", termtext.SingleLine(cfg.Credentials))
 	fmt.Fprintf(stdout, "db %s\n", termtext.SingleLine(cfg.DB))
-	fmt.Fprintln(stdout, "next: gmail-to-duckdb doctor && gmail-to-duckdb serve --sync-every 5m")
+	fmt.Fprintln(stdout, "next: gmail-to-duckdb serve --sync-every 5m")
 	return nil
 }
 
 func cmdDoctor(args []string, stdout io.Writer) error {
 	cf := globalFlags("doctor")
 	asJSON := cf.fs.Bool("json", false, "JSON envelope")
-	port := cf.fs.String("port", config.Load().Port, "UI port")
-	if err := parseFlags(cf.fs, args); err != nil {
+	port := cf.fs.String("port", cf.cfg.Port, "UI port")
+	if err := cf.parse(args); err != nil {
 		return err
 	}
-	cfg := config.Load()
+	cfg := cf.cfg
 	cfg.DB = *cf.db
 	cfg.Credentials = *cf.creds
 	cfg.OAuthPort = *cf.oauthPort

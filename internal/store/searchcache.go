@@ -588,17 +588,6 @@ func inspectOwnedRegular(path string) error {
 	return privfile.Check(path)
 }
 
-func inspectOwnedRegularIfExists(path string) error {
-	_, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return inspectOwnedRegular(path)
-}
-
 func removeIndexSidecars(path string) {
 	for _, suf := range cacheSidecarSuffixes {
 		if suf == "" {

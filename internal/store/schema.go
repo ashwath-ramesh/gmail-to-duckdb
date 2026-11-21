@@ -13,6 +13,19 @@ const (
 	StateLastSyncOK    = "last_sync_ok"
 	StateLastSyncError = "last_sync_error"
 	StateProfileEmail  = "profile_email"
+
+	// Sync cursor keys. Only CommitSyncPage and migrations write them.
+	StateHistoryID    = "history_id"
+	StateListPage     = "list_page_token"
+	StateHistoryPage  = "history_page_token"
+	StateHistoryStart = "history_start_id"
+	StateFullStart    = "full_start_history_id"
+	StateFullPhase    = "full_phase"
+
+	// Full-sync phases stored in StateFullPhase.
+	PhaseList     = "list"
+	PhaseListFull = "list_full"
+	PhaseCatchup  = "catchup"
 )
 
 const schema = `
@@ -188,22 +201,22 @@ func migrateToV4Data(ctx context.Context, tx *sql.Tx) error {
 }
 
 func discardUnsafeCursorsTx(ctx context.Context, tx *sql.Tx) error {
-	phase, hasPhase, err := getStateTx(ctx, tx, "full_phase")
+	phase, hasPhase, err := queryState(ctx, tx, StateFullPhase)
 	if err != nil {
 		return err
 	}
-	anchor, hasAnchor, err := getStateTx(ctx, tx, "full_start_history_id")
+	anchor, hasAnchor, err := queryState(ctx, tx, StateFullStart)
 	if err != nil {
 		return err
 	}
-	if hasPhase && knownFullPhase(phase) && hasAnchor && parseStateUint(anchor) > 0 {
+	if hasPhase && KnownFullPhase(phase) && hasAnchor && ParseStateUint(anchor) > 0 {
 		return nil
 	}
-	_, hasList, err := getStateTx(ctx, tx, "list_page_token")
+	_, hasList, err := queryState(ctx, tx, StateListPage)
 	if err != nil {
 		return err
 	}
-	for _, key := range []string{"list_page_token", "history_page_token", "history_start_id"} {
+	for _, key := range []string{StateListPage, StateHistoryPage, StateHistoryStart} {
 		if err := clearStateTx(ctx, tx, key); err != nil {
 			return err
 		}
@@ -211,17 +224,19 @@ func discardUnsafeCursorsTx(ctx context.Context, tx *sql.Tx) error {
 	if !hasPhase && !hasList {
 		return nil
 	}
-	if err := setStateTx(ctx, tx, "full_phase", "list_full"); err != nil {
+	if err := setStateTx(ctx, tx, StateFullPhase, PhaseListFull); err != nil {
 		return err
 	}
-	return clearStateTx(ctx, tx, "full_start_history_id")
+	return clearStateTx(ctx, tx, StateFullStart)
 }
 
-func knownFullPhase(phase string) bool {
-	return phase == "list" || phase == "list_full" || phase == "catchup"
+// KnownFullPhase reports whether phase is a full-sync phase that this version writes.
+func KnownFullPhase(phase string) bool {
+	return phase == PhaseList || phase == PhaseListFull || phase == PhaseCatchup
 }
 
-func parseStateUint(s string) uint64 {
+// ParseStateUint parses a numeric state value. A bad value gives 0.
+func ParseStateUint(s string) uint64 {
 	v, _ := strconv.ParseUint(s, 10, 64)
 	return v
 }
@@ -250,16 +265,4 @@ WHERE table_schema = 'main' AND table_name = 'sync_state'
 		return 0, fmt.Errorf("schema_version: %w", err)
 	}
 	return ver, nil
-}
-
-func getStateTx(ctx context.Context, tx *sql.Tx, key string) (string, bool, error) {
-	var v string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM sync_state WHERE key = ?", key).Scan(&v)
-	if err == sql.ErrNoRows {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return v, true, nil
 }

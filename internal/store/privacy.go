@@ -51,22 +51,32 @@ func hardenSearchSidecar(dbPath string) error {
 	return inspectCacheDir(dir, false)
 }
 
+// ensureDir creates dir with owner-only access if it is missing. An existing
+// path must be a real directory, not a symlink. It reports whether dir existed.
+func ensureDir(dir, what string) (bool, error) {
+	fi, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return false, privfile.MkdirPrivate(dir)
+	}
+	if err != nil {
+		return false, err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return true, fmt.Errorf("%s is a symlink", what)
+	}
+	if !fi.IsDir() {
+		return true, fmt.Errorf("%s is not a directory", what)
+	}
+	return true, nil
+}
+
 func prepareParent(dir string) error {
 	if dir == "" {
 		return fmt.Errorf("empty database directory")
 	}
-	fi, err := os.Lstat(dir)
-	if os.IsNotExist(err) {
-		return privfile.MkdirPrivate(dir)
-	}
-	if err != nil {
+	existed, err := ensureDir(dir, "database directory")
+	if err != nil || !existed {
 		return err
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("database directory is a symlink")
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("database parent is not a directory")
 	}
 	return checkExistingParent(dir)
 }
@@ -102,21 +112,12 @@ func hardenIfExists(path string) error {
 
 func prepareSpill(path string) (string, error) {
 	dir := path + ".tmp"
-	fi, err := os.Lstat(dir)
-	if os.IsNotExist(err) {
-		if err := privfile.MkdirPrivate(dir); err != nil {
-			return "", err
-		}
-		return dir, nil
-	}
+	existed, err := ensureDir(dir, "spill directory")
 	if err != nil {
 		return "", err
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("spill directory is a symlink")
-	}
-	if !fi.IsDir() {
-		return "", fmt.Errorf("spill path is not a directory")
+	if !existed {
+		return dir, nil
 	}
 	if err := privfile.HardenDir(dir); err != nil {
 		return "", err

@@ -16,20 +16,32 @@ import (
 
 type cmdFlags struct {
 	fs        *flag.FlagSet
+	cfg       config.Config
+	cfgErr    error
 	db        *string
 	creds     *string
 	oauthPort *int
 }
 
 func globalFlags(name string) cmdFlags {
-	cfg := config.Load()
+	cfg, err := config.Load()
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	return cmdFlags{
 		fs:        fs,
+		cfg:       cfg,
+		cfgErr:    err,
 		db:        fs.String("db", cfg.DB, "DuckDB file"),
 		creds:     fs.String("credentials", cfg.Credentials, "OAuth credentials JSON"),
 		oauthPort: fs.Int("oauth-port", cfg.OAuthPort, "OAuth loopback port"),
 	}
+}
+
+// parse parses args and reports a config file that could not be read.
+func (cf cmdFlags) parse(args []string) error {
+	if err := parseFlags(cf.fs, args); err != nil {
+		return err
+	}
+	return cf.cfgErr
 }
 
 func parseFlags(fs *flag.FlagSet, args []string) error {
@@ -104,13 +116,11 @@ func writeSQLTable(w io.Writer, res *query.SQLPayload) error {
 	return tw.Flush()
 }
 
+// joinTab escapes each cell for the terminal and joins the cells with tabs.
 func joinTab(cols []string) string {
-	out := ""
+	out := make([]string, len(cols))
 	for i, c := range cols {
-		if i > 0 {
-			out += "\t"
-		}
-		out += termtext.SingleLine(c)
+		out[i] = termtext.SingleLine(c)
 	}
-	return out
+	return strings.Join(out, "\t")
 }

@@ -8,14 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 )
 
 const (
-	indexBatchMsgs    = 256
-	indexBatchBytes   = 8 << 20
-	indexCatchupEvery = 2 * time.Second
+	indexBatchMsgs  = 256
+	indexBatchBytes = 8 << 20
+	// Every write calls notifyIndex. The tick only retries after an error.
+	indexCatchupEvery = 15 * time.Second
 )
 
 func (d *DB) StartMaintenance(ctx context.Context) {
@@ -77,9 +76,6 @@ func (d *DB) catchupIndex(ctx context.Context, force bool) error {
 	if err != nil {
 		return err
 	}
-	if fresh.accelOff {
-		return nil
-	}
 	if fresh.repair {
 		if err := d.repairSearchText(ctx); err != nil {
 			return err
@@ -113,9 +109,6 @@ func (d *DB) catchupIndex(ctx context.Context, force bool) error {
 	fresh, err = d.readFreshness(ctx, conn)
 	if err != nil {
 		return err
-	}
-	if fresh.accelOff {
-		return nil
 	}
 	meta, metaErr := d.idx.peek(ctx)
 	d.idx.mu.Lock()
@@ -358,18 +351,9 @@ FROM messages WHERE id IN `)
 }
 
 func prepareSearchDir(dir string) error {
-	fi, err := os.Lstat(dir)
-	if os.IsNotExist(err) {
-		return privfile.MkdirPrivate(dir)
-	}
-	if err != nil {
+	existed, err := ensureDir(dir, "search directory")
+	if err != nil || !existed {
 		return err
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("search directory is a symlink")
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("search path is not a directory")
 	}
 	return inspectCacheDir(dir, false)
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/search"
 )
@@ -17,7 +16,7 @@ var errIndexSkip = errors.New("search index unused")
 
 func (d *DB) searchMessages(ctx context.Context, f ListFilter, q search.Query) ([]Message, error) {
 	if len(q.Terms) == 0 {
-		return d.queryList(ctx, nil, f, q, nil, true, f.Limit, f.Offset, false, time.Time{}, "")
+		return d.queryList(ctx, nil, f, q, nil, true, f.Limit, f.Offset)
 	}
 	msgs, err := d.indexedSearch(ctx, f, q)
 	if err == nil {
@@ -95,7 +94,7 @@ func (d *DB) indexedSearch(ctx context.Context, f ListFilter, q search.Query) ([
 	if d.testHoldDuck != nil {
 		d.testHoldDuck()
 	}
-	if fresh.accelOff || fresh.repair || fresh.identity != meta.Identity || fresh.epoch != meta.Epoch || meta.Version != searchIndexVer || !meta.Ready || meta.Watermark > fresh.corpus {
+	if fresh.repair || fresh.identity != meta.Identity || fresh.epoch != meta.Epoch || meta.Version != searchIndexVer || !meta.Ready || meta.Watermark > fresh.corpus {
 		return nil, errIndexSkip
 	}
 
@@ -115,7 +114,7 @@ func (d *DB) indexedSearch(ctx context.Context, f ListFilter, q search.Query) ([
 		for _, c := range merged[start:end] {
 			ids = append(ids, c.ID)
 		}
-		page, err := d.queryList(ctx, duck, f, q, q.Terms, !fresh.repair, len(ids), 0, false, time.Time{}, "", ids...)
+		page, err := d.queryList(ctx, duck, f, q, q.Terms, !fresh.repair, len(ids), 0, ids...)
 		if err != nil {
 			return nil, err
 		}
@@ -160,11 +159,11 @@ func (d *DB) literalSearch(ctx context.Context, f ListFilter, q search.Query) ([
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return d.queryList(ctx, conn, f, q, q.Terms, !fresh.repair, f.Limit, f.Offset, false, time.Time{}, "")
+	return d.queryList(ctx, conn, f, q, q.Terms, !fresh.repair, f.Limit, f.Offset)
 }
 
-func (d *DB) queryList(ctx context.Context, conn *sql.Conn, f ListFilter, q search.Query, terms []string, useCachedText bool, limit, offset int, keyed bool, afterDate time.Time, afterID string, ids ...string) ([]Message, error) {
-	query, args := buildListQuery(f, q, terms, useCachedText, limit, offset, keyed, afterDate, afterID, ids...)
+func (d *DB) queryList(ctx context.Context, conn *sql.Conn, f ListFilter, q search.Query, terms []string, useCachedText bool, limit, offset int, ids ...string) ([]Message, error) {
+	query, args := buildListQuery(f, q, terms, useCachedText, limit, offset, ids...)
 	var (
 		rows *sql.Rows
 		err  error
@@ -181,7 +180,7 @@ func (d *DB) queryList(ctx context.Context, conn *sql.Conn, f ListFilter, q sear
 	return scanMessages(rows)
 }
 
-func buildListQuery(f ListFilter, q search.Query, terms []string, useCachedText bool, limit, offset int, keyed bool, afterDate time.Time, afterID string, ids ...string) (string, []any) {
+func buildListQuery(f ListFilter, q search.Query, terms []string, useCachedText bool, limit, offset int, ids ...string) (string, []any) {
 	var b strings.Builder
 	args := make([]any, 0, 16+len(ids))
 	textSQL := searchTextSQL
@@ -219,13 +218,9 @@ func buildListQuery(f ListFilter, q search.Query, terms []string, useCachedText 
 		b.WriteString(" AND (messages.internal_date < ? OR (messages.internal_date = ? AND messages.id < ?))")
 		args = append(args, f.AfterDate.UTC(), f.AfterDate.UTC(), f.AfterID)
 	}
-	if keyed {
-		b.WriteString(" AND (messages.internal_date < ? OR (messages.internal_date = ? AND messages.id < ?))")
-		args = append(args, afterDate.UTC(), afterDate.UTC(), afterID)
-	}
 	b.WriteString(" ORDER BY messages.internal_date DESC, messages.id DESC LIMIT ?")
 	args = append(args, limit)
-	if searchPage && offset > 0 && len(ids) == 0 && !keyed {
+	if searchPage && offset > 0 && len(ids) == 0 {
 		b.WriteString(" OFFSET ?")
 		args = append(args, offset)
 	}
@@ -235,10 +230,6 @@ func buildListQuery(f ListFilter, q search.Query, terms []string, useCachedText 
 func appendFilters(b *strings.Builder, args []any, f ListFilter, q search.Query) []any {
 	if f.Unread {
 		b.WriteString(" AND NOT messages.is_read")
-	}
-	if f.From != "" {
-		b.WriteString(" AND messages.from_email = ?")
-		args = append(args, f.From)
 	}
 	if q.From != "" {
 		b.WriteString(" AND (messages.from_email ILIKE ?" + likeEscape + " OR messages.from_name ILIKE ?" + likeEscape + ")")
@@ -253,10 +244,6 @@ func appendFilters(b *strings.Builder, args []any, f ListFilter, q search.Query)
 	if q.Subject != "" {
 		b.WriteString(" AND messages.subject ILIKE ?" + likeEscape)
 		args = append(args, likeContains(q.Subject))
-	}
-	if f.Label != "" {
-		b.WriteString(" AND list_contains(messages.label_ids, ?)")
-		args = append(args, f.Label)
 	}
 	if !f.After.IsZero() {
 		b.WriteString(" AND messages.internal_date >= ?")

@@ -17,7 +17,7 @@ func seedStatus(t *testing.T, s *Server) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	s.SeedStatus(ctx)
+	s.refreshStatus(ctx)
 }
 
 func startStatus(t *testing.T, s *Server) {
@@ -81,7 +81,7 @@ func TestHealthAndStatusWhilePoolHeld(t *testing.T) {
 func TestExpiredStatusWhilePoolHeld(t *testing.T) {
 	s, db := testServer(t)
 	seedStatus(t, s)
-	s.noteChange()
+	s.wakeStatus()
 	h := s.Handler()
 	release := holdDuckPool(t, db)
 	defer release()
@@ -106,18 +106,12 @@ func TestStatusKeepsSyncErrorAndNoteChange(t *testing.T) {
 	s, _ := testServer(t)
 	seedStatus(t, s)
 	s.endSync(errors.New("sync boom"))
-	env, err := s.liveStatus(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	env := s.liveStatus()
 	if env.LastError != "sync boom" {
 		t.Fatalf("lost sync error %q", env.LastError)
 	}
-	s.noteChange()
-	env, err = s.liveStatus(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	s.wakeStatus()
+	env = s.liveStatus()
 	if env.LastError != "sync boom" {
 		t.Fatalf("noteChange wiped sync error %q", env.LastError)
 	}
@@ -132,10 +126,7 @@ func TestStatusOverlaySurvivesBlockedRefresh(t *testing.T) {
 	release := holdDuckPool(t, db)
 	startStatus(t, s)
 	s.endSync(errors.New("sync boom"))
-	env, err := s.liveStatus(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	env := s.liveStatus()
 	if env.LastError != "sync boom" {
 		release()
 		t.Fatalf("blocked refresh hid sync error %q", env.LastError)
@@ -157,7 +148,7 @@ func TestStatusOverlaySurvivesBlockedRefresh(t *testing.T) {
 	release()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		env, _ = s.liveStatus(context.Background())
+		env = s.liveStatus()
 		if env.LastError == "sync boom" && env.BodyCoverage.Total == 1 {
 			return
 		}

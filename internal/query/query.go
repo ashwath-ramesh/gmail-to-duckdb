@@ -32,7 +32,6 @@ type Envelope struct {
 	UntrustedContent bool         `json:"untrusted_content"`
 	UntrustedFields  []string     `json:"untrusted_fields,omitempty"`
 	FTS              bool         `json:"fts"`
-	DuckDBUI         bool         `json:"duckdb_ui,omitempty"`
 	Phase            string       `json:"phase,omitempty"`
 	Processed        int          `json:"processed,omitempty"`
 	LastError        string       `json:"last_error,omitempty"`
@@ -81,9 +80,12 @@ type SQLPayload struct {
 }
 
 type Check struct {
-	Name   string `json:"name"`
-	OK     bool   `json:"ok"`
-	Detail string `json:"detail"`
+	Name string `json:"name"`
+	OK   bool   `json:"ok"`
+	// Pending marks a step that has not happened yet (no sign-in, no mailbox).
+	// It is not a failure.
+	Pending bool   `json:"pending,omitempty"`
+	Detail  string `json:"detail"`
 }
 
 type Local struct {
@@ -290,7 +292,9 @@ func FormatHuman(env Envelope) string {
 	}
 	for _, c := range env.Checks {
 		mark := "ok"
-		if !c.OK {
+		if c.Pending {
+			mark = "pending"
+		} else if !c.OK {
 			mark = "FAIL"
 		}
 		fmt.Fprintf(&b, "%s %s %s\n", mark, termtext.SingleLine(c.Name), termtext.SingleLine(c.Detail))

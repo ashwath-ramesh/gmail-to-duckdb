@@ -1,6 +1,11 @@
 package gmail
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+
+	gmailapi "google.golang.org/api/gmail/v1"
+)
 
 func TestParseHistory(t *testing.T) {
 	raw := []byte(`{
@@ -15,10 +20,11 @@ func TestParseHistory(t *testing.T) {
 		"historyId": "77",
 		"nextPageToken": "n1"
 	}`)
-	page, err := parseHistory(raw)
-	if err != nil {
+	var r gmailapi.ListHistoryResponse
+	if err := json.Unmarshal(raw, &r); err != nil {
 		t.Fatal(err)
 	}
+	page := historyPage(&r)
 	if page.HistoryID != 77 || page.NextPageToken != "n1" {
 		t.Fatalf("meta: %+v", page)
 	}
@@ -28,13 +34,7 @@ func TestParseHistory(t *testing.T) {
 	if len(page.Deleted) != 1 || page.Deleted[0] != "d" {
 		t.Fatalf("deleted: %#v", page.Deleted)
 	}
-	if len(page.LabelUpdates) != 2 {
-		t.Fatalf("labels: %#v", page.LabelUpdates)
-	}
-	if page.LabelUpdates[0].ID != "x" || len(page.LabelUpdates[0].Labels) != 2 {
-		t.Fatalf("x: %+v", page.LabelUpdates[0])
-	}
-	if page.LabelUpdates[1].ID != "y" || len(page.LabelUpdates[1].Labels) != 1 {
-		t.Fatalf("y: %+v", page.LabelUpdates[1])
+	if len(page.LabelChanged) != 2 || page.LabelChanged[0] != "x" || page.LabelChanged[1] != "y" {
+		t.Fatalf("labels: %#v", page.LabelChanged)
 	}
 }

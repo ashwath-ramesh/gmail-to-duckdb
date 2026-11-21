@@ -2,6 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,13 +61,20 @@ func Path() string {
 	return filepath.Join(Dir(), "config.json")
 }
 
-func Load() Config {
+// Load reads the config file. A missing file gives the defaults. An unreadable
+// or invalid file is an error: a silent fallback would open a different mailbox.
+func Load() (Config, error) {
 	c := Defaults()
 	b, err := os.ReadFile(Path())
 	if err != nil {
-		return c
+		if errors.Is(err, fs.ErrNotExist) {
+			return c, nil
+		}
+		return c, fmt.Errorf("read config %s: %w", Path(), err)
 	}
-	_ = json.Unmarshal(b, &c)
+	if err := json.Unmarshal(b, &c); err != nil {
+		return Defaults(), fmt.Errorf("config %s is not valid JSON (%v); fix it, or run gmail-to-duckdb init to write it again", Path(), err)
+	}
 	if c.DB == "" {
 		c.DB = DefaultDB
 	}
@@ -79,7 +89,7 @@ func Load() Config {
 	}
 	c.DB = Expand(c.DB)
 	c.Credentials = Expand(c.Credentials)
-	return c
+	return c, nil
 }
 
 func Write(c Config) error {

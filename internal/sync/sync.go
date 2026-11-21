@@ -13,16 +13,16 @@ import (
 )
 
 const (
-	stateHistoryID    = "history_id"
-	stateListPage     = "list_page_token"
-	stateHistoryPage  = "history_page_token"
-	stateHistoryStart = "history_start_id"
-	stateFullStart    = "full_start_history_id"
-	stateFullPhase    = "full_phase"
+	stateHistoryID    = store.StateHistoryID
+	stateListPage     = store.StateListPage
+	stateHistoryPage  = store.StateHistoryPage
+	stateHistoryStart = store.StateHistoryStart
+	stateFullStart    = store.StateFullStart
+	stateFullPhase    = store.StateFullPhase
 
-	phaseList     = "list"
-	phaseListFull = "list_full"
-	phaseCatchup  = "catchup"
+	phaseList     = store.PhaseList
+	phaseListFull = store.PhaseListFull
+	phaseCatchup  = store.PhaseCatchup
 
 	bodyPageSize = 50
 	persistBound = 10 * time.Second
@@ -46,6 +46,7 @@ type Runner struct {
 	Log           func(string, ...any)
 	OnProgress    func(Progress)
 	processed     int
+	skipped       int
 	phase         string
 	fullRestarted bool
 }
@@ -71,7 +72,7 @@ func (r *Runner) finish(err error) error {
 	write, cancel := persistContext()
 	defer cancel()
 	if err != nil {
-		if werr := r.DB.SetState(write, store.StateLastSyncError, err.Error()); werr != nil {
+		if werr := r.DB.SetState(write, store.StateLastSyncError, shortError(err)); werr != nil {
 			return errors.Join(err, werr)
 		}
 		return err
@@ -86,12 +87,27 @@ func (r *Runner) finish(err error) error {
 	return nil
 }
 
+// shortError limits the stored and displayed error text. A joined error for
+// a large batch can list hundreds of message ids.
+func shortError(err error) string {
+	msg := []rune(err.Error())
+	if len(msg) > 500 {
+		msg = append(msg[:500], '…')
+	}
+	return string(msg)
+}
+
 func (r *Runner) Sync(ctx context.Context, opt Options) error {
-	return r.finish(r.sync(ctx, opt))
+	err := r.finish(r.sync(ctx, opt))
+	if r.skipped > 0 {
+		r.logf("sync skipped %d messages whose Gmail metadata does not parse", r.skipped)
+	}
+	return err
 }
 
 func (r *Runner) sync(ctx context.Context, opt Options) error {
 	r.processed = 0
+	r.skipped = 0
 	r.fullRestarted = false
 	r.progress("profile")
 	profile, err := r.API.Profile(ctx)
@@ -175,9 +191,9 @@ func (r *Runner) inspectFullResume(ctx context.Context, opt Options, hasHist boo
 	if err != nil {
 		return false, false, err
 	}
-	trustworthy := hasAnchor && parseUint(anchor) > 0
+	trustworthy := hasAnchor && store.ParseStateUint(anchor) > 0
 	if hasPhase {
-		if !knownPhase(phase) {
+		if !store.KnownFullPhase(phase) {
 			mark := opt.Full || hasHist
 			if err := r.restartFull(ctx, profile.HistoryID, mark, !trustworthy); err != nil {
 				return false, false, err
@@ -223,7 +239,7 @@ func (r *Runner) prepareFull(ctx context.Context, anchor uint64, markDeleted, re
 		if err != nil {
 			return err
 		}
-		if !ok || parseUint(cur) == 0 {
+		if !ok || store.ParseStateUint(cur) == 0 {
 			replaceAnchor = true
 		}
 	}
@@ -261,7 +277,7 @@ func (r *Runner) runFull(ctx context.Context, profile gmail.Profile, markDeleted
 	if err != nil {
 		return err
 	}
-	if phase != "" && !knownPhase(phase) {
+	if phase != "" && !store.KnownFullPhase(phase) {
 		return fmt.Errorf("unknown full_phase %q", phase)
 	}
 	startedCatchup := phase == phaseCatchup
@@ -293,7 +309,7 @@ func (r *Runner) afterFull(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	start := parseUint(anchor)
+	start := store.ParseStateUint(anchor)
 	if !ok || start == 0 {
 		return fmt.Errorf("full catchup missing history anchor")
 	}
@@ -368,7 +384,7 @@ func (r *Runner) incremental(ctx context.Context, start uint64) error {
 		return err
 	}
 	if s, ok, _ := r.DB.GetState(ctx, stateHistoryStart); ok {
-		if v := parseUint(s); v > 0 {
+		if v := store.ParseStateUint(s); v > 0 {
 			start = v
 		}
 	}
@@ -386,9 +402,7 @@ func (r *Runner) incremental(ctx context.Context, start uint64) error {
 			return err
 		}
 		need := append([]string{}, page.Added...)
-		for _, u := range page.LabelUpdates {
-			need = append(need, u.ID)
-		}
+		need = append(need, page.LabelChanged...)
 		need = unique(need)
 		msgs, tombs, unresolved := r.fetchParsed(ctx, need, "metadata")
 		if unresolved != nil {
@@ -558,11 +572,14 @@ func (r *Runner) collectFetch(ctx context.Context, ids []string, format string) 
 			}
 			msg, err := parse.Message(res.Raw)
 			if err != nil {
-				r.logf("skip parse: %v", err)
 				if full {
+					r.logf("skip parse: %v", err)
 					unresolved = errors.Join(unresolved, errBodyIncomplete, err)
 				} else {
-					unresolved = errors.Join(unresolved, err)
+					// A metadata reply that does not parse will not parse next time.
+					// Skip it, so that one bad message cannot stop every sync.
+					r.logf("skip message %s: Gmail metadata does not parse: %v", id, err)
+					r.skipped++
 				}
 				continue
 			}
@@ -591,21 +608,12 @@ func (r *Runner) collectFetch(ctx context.Context, ids []string, format string) 
 	return msgs, tombs, unresolved, updates
 }
 
-func knownPhase(phase string) bool {
-	return phase == phaseList || phase == phaseListFull || phase == phaseCatchup
-}
-
 func (r *Runner) noteWrite(n int) {
 	if n <= 0 {
 		return
 	}
 	r.processed += n
 	r.progress(r.phase)
-}
-
-func parseUint(s string) uint64 {
-	v, _ := strconv.ParseUint(s, 10, 64)
-	return v
 }
 
 func unique(ids []string) []string {

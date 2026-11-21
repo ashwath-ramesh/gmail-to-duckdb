@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"os/exec"
@@ -397,7 +396,7 @@ func TestReopenKeepsRows(t *testing.T) {
 
 func TestOpenSpillDirPrivateBeforeLock(t *testing.T) {
 	path := filepath.Join(privateDir(t), "mail.duckdb")
-	db, err := openWith(path, Options{}, func(ex execer) execer {
+	db, err := openWith(path, func(ex execer) error {
 		ctx := context.Background()
 		for _, q := range []string{
 			"SET memory_limit = '32MB'",
@@ -405,10 +404,10 @@ func TestOpenSpillDirPrivateBeforeLock(t *testing.T) {
 			"SET preserve_insertion_order = false",
 		} {
 			if _, err := ex.ExecContext(ctx, q); err != nil {
-				return errExec{err}
+				return err
 			}
 		}
-		return ex
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -472,12 +471,6 @@ func TestOpenSpillDirPrivateBeforeLock(t *testing.T) {
 	if err := <-errc; err != nil {
 		t.Fatal(err)
 	}
-}
-
-type errExec struct{ err error }
-
-func (e errExec) ExecContext(context.Context, string, ...any) (sql.Result, error) {
-	return nil, e.err
 }
 
 func privateDir(t *testing.T) string {

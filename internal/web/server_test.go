@@ -107,7 +107,7 @@ func TestSecurityHeaders(t *testing.T) {
 	h := s.Handler()
 	w := req(t, h, http.MethodGet, "/")
 	csp := w.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "img-src 'self'") {
+	if !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "img-src 'none'") || !strings.Contains(csp, "form-action 'none'") {
 		t.Fatalf("csp %q", csp)
 	}
 	if w.Header().Get("Referrer-Policy") != "no-referrer" {
@@ -304,69 +304,27 @@ func TestEmptyTokenDeniesAPI(t *testing.T) {
 	}
 }
 
-func TestSessionCookie(t *testing.T) {
+func TestIndexSetsNoCookie(t *testing.T) {
 	s, _ := testServer(t)
 	w := req(t, s.Handler(), http.MethodGet, "/")
-	if !strings.Contains(w.Header().Get("Set-Cookie"), "session=test") {
-		t.Fatalf("cookie %q", w.Header().Get("Set-Cookie"))
+	if w.Code != 200 || w.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("code %d cookie %q", w.Code, w.Header().Get("Set-Cookie"))
+	}
+	for _, h := range []string{"X-Frame-Options", "X-Content-Type-Options"} {
+		if w.Header().Get(h) == "" {
+			t.Fatalf("missing %s", h)
+		}
+	}
+	if !strings.Contains(w.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+		t.Fatalf("csp %q", w.Header().Get("Content-Security-Policy"))
 	}
 }
 
-func TestDuckUIDisabled(t *testing.T) {
+func TestDuckUIRouteRemoved(t *testing.T) {
 	s, _ := testServer(t)
-	createUITableMacro(t, s, "start_ui", "'started'")
-	createUITableMacro(t, s, "start_ui_server", "'started'")
-	createUITableMacro(t, s, "get_ui_url", "'http://[::1]:55555'")
 	w := req(t, s.Handler(), http.MethodPost, "/api/duckdb-ui")
-	if w.Code != http.StatusBadRequest {
+	if w.Code != http.StatusNotFound && w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("code %d %s", w.Code, w.Body.String())
-	}
-	if strings.Contains(w.Body.String(), `"url"`) {
-		t.Fatalf("opt-out returned url %s", w.Body.String())
-	}
-}
-
-func TestDuckUIReturnsActualURL(t *testing.T) {
-	s, _ := testServer(t)
-	s.AllowDuckUI = true
-	createUITableMacro(t, s, "start_ui", "'started'")
-	createUITableMacro(t, s, "start_ui_server", "'started'")
-	createUITableMacro(t, s, "get_ui_url", "'http://[::1]:55555'")
-	w := req(t, s.Handler(), http.MethodPost, "/api/duckdb-ui")
-	if w.Code != 200 {
-		t.Fatalf("code %d %s", w.Code, w.Body.String())
-	}
-	var out struct {
-		URL string `json:"url"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
-		t.Fatal(err)
-	}
-	if out.URL != "http://[::1]:55555" {
-		t.Fatalf("url %q", out.URL)
-	}
-}
-
-func TestDuckUIURLErrorIsNotSuccess(t *testing.T) {
-	s, _ := testServer(t)
-	s.AllowDuckUI = true
-	createUITableMacro(t, s, "start_ui", "'started'")
-	createUITableMacro(t, s, "start_ui_server", "'started'")
-	createUITableMacro(t, s, "get_ui_url", "error('no url')")
-	w := req(t, s.Handler(), http.MethodPost, "/api/duckdb-ui")
-	if w.Code == 200 {
-		t.Fatalf("success %s", w.Body.String())
-	}
-	if strings.Contains(w.Body.String(), `"url"`) {
-		t.Fatalf("error returned url %s", w.Body.String())
-	}
-}
-
-func createUITableMacro(t *testing.T, s *Server, name, expr string) {
-	t.Helper()
-	q := "CREATE OR REPLACE MACRO " + name + "() AS TABLE SELECT " + expr
-	if _, err := s.DB.SQL().Exec(q); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -571,16 +529,27 @@ func TestOriginAndFetchSite(t *testing.T) {
 		t.Fatalf("cli %d %s", w.Code, w.Body.String())
 	}
 	w = doReq(t, h, http.MethodGet, "/api/messages", host, http.Header{
-		"Cookie":         {"session=test"},
+		"X-Token":        {"test"},
 		"Origin":         {"http://127.0.0.1:8080"},
 		"Sec-Fetch-Site": {"same-origin"},
 	}, nil)
 	if w.Code != 200 {
-		t.Fatalf("cookie %d %s", w.Code, w.Body.String())
+		t.Fatalf("browser %d %s", w.Code, w.Body.String())
 	}
-	w = doReq(t, h, http.MethodGet, "/", host, http.Header{"Sec-Fetch-Site": {"none"}}, nil)
-	if w.Code != 200 || !strings.Contains(w.Header().Get("Set-Cookie"), "session=test") {
-		t.Fatalf("nav %d cookie %q", w.Code, w.Header().Get("Set-Cookie"))
+	w = doReq(t, h, http.MethodGet, "/api/messages", host, http.Header{
+		"Cookie":         {"session=test"},
+		"Origin":         {"http://127.0.0.1:8080"},
+		"Sec-Fetch-Site": {"same-origin"},
+	}, nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("cookie must not authenticate: %d %s", w.Code, w.Body.String())
+	}
+	// The app shell has no data, so a cross-site navigation (the launcher file) may load it.
+	for _, site := range []string{"none", "cross-site"} {
+		w = doReq(t, h, http.MethodGet, "/", host, http.Header{"Sec-Fetch-Site": {site}}, nil)
+		if w.Code != 200 || w.Header().Get("Set-Cookie") != "" {
+			t.Fatalf("nav %s %d cookie %q", site, w.Code, w.Header().Get("Set-Cookie"))
+		}
 	}
 
 	deny := []http.Header{
@@ -598,16 +567,14 @@ func TestOriginAndFetchSite(t *testing.T) {
 		{"X-Forwarded-Host": {"127.0.0.1:8080"}},
 	}
 	for i, hdr := range deny {
+		hdr.Set("X-Token", "test")
 		if hdr.Get("X-Forwarded-Host") != "" {
-			w = doReq(t, h, http.MethodGet, "/", "evil.example", hdr, nil)
+			w = doReq(t, h, http.MethodGet, "/api/status", "evil.example", hdr, nil)
 		} else {
-			w = doReq(t, h, http.MethodGet, "/", host, hdr, nil)
+			w = doReq(t, h, http.MethodGet, "/api/status", host, hdr, nil)
 		}
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("deny %d code %d hdr %v", i, w.Code, hdr)
-		}
-		if strings.Contains(w.Header().Get("Set-Cookie"), "session=") {
-			t.Fatalf("deny %d cookie %q", i, w.Header().Get("Set-Cookie"))
 		}
 	}
 	w = doReq(t, h, http.MethodGet, "/", host, http.Header{"X-Forwarded-Host": {"evil.example"}}, nil)

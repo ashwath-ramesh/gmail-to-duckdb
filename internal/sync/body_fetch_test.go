@@ -259,7 +259,7 @@ func TestMetadataRefreshPreservesFetched(t *testing.T) {
 	}
 	api.historyCalls = 0
 	api.historyPages = []gmail.HistoryPage{{
-		LabelUpdates: []gmail.LabelUpdate{{ID: "m", Labels: []string{"INBOX"}}},
+		LabelChanged: []string{"m"},
 		HistoryID:    11,
 	}}
 	api.raw["m"] = rawMsg("m", "a@x.com", "New subject", false, "")

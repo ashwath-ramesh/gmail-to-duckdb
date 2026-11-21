@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,13 @@ import (
 // DefaultOAuthPort is a fixed loopback port so a remote SSH tunnel can stay open.
 const DefaultOAuthPort = 41807
 
+// Each HTTP request has a time limit, so that one hung request cannot stop
+// sync forever. Gmail batch replies can be large, so they get more time.
+const (
+	tokenRequestTimeout = 30 * time.Second
+	apiRequestTimeout   = 2 * time.Minute
+)
+
 var errNeedLogin = errors.New("token unusable")
 var errInvalidGrant = errors.New("oauth refresh token rejected")
 
@@ -37,10 +45,56 @@ func TokenPath(dbPath string) string {
 	return strings.TrimSuffix(dbPath, ext) + ".token.json"
 }
 
+// CheckDesktopClient checks that raw is a Google OAuth Desktop client file.
+// The file names the OAuth endpoints, so they must be Google HTTPS hosts:
+// otherwise a changed file could send the sign-in code and the refresh token
+// to another server.
+func CheckDesktopClient(raw []byte) error {
+	var doc struct {
+		Installed *struct {
+			ClientID     string `json:"client_id"`
+			ClientSecret string `json:"client_secret"`
+			AuthURI      string `json:"auth_uri"`
+			TokenURI     string `json:"token_uri"`
+		} `json:"installed"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("credentials JSON: %w", err)
+	}
+	in := doc.Installed
+	if in == nil {
+		return fmt.Errorf("credentials must be a Desktop app client (key \"installed\")")
+	}
+	if in.ClientID == "" || in.ClientSecret == "" {
+		return fmt.Errorf("credentials must have client_id and client_secret")
+	}
+	for name, v := range map[string]string{"auth_uri": in.AuthURI, "token_uri": in.TokenURI} {
+		if v == "" {
+			continue
+		}
+		u, err := url.Parse(v)
+		if err != nil || u.Scheme != "https" || u.User != nil || !googleOAuthHost(u.Host) {
+			return fmt.Errorf("credentials %s must be a Google https URL, got %q", name, v)
+		}
+	}
+	return nil
+}
+
+func googleOAuthHost(h string) bool {
+	switch strings.ToLower(h) {
+	case "accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com":
+		return true
+	}
+	return false
+}
+
 func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) (*http.Client, error) {
 	raw, err := privfile.Read(credPath)
 	if err != nil {
 		return nil, fmt.Errorf("read credentials %s: %w", credPath, err)
+	}
+	if err := CheckDesktopClient(raw); err != nil {
+		return nil, err
 	}
 	cfg, err := google.ConfigFromJSON(raw, gmailapi.GmailReadonlyScope)
 	if err != nil {
@@ -49,7 +103,9 @@ func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) 
 	if oauthPort <= 0 {
 		oauthPort = DefaultOAuthPort
 	}
-	tok, err := loadToken(tokenPath)
+	// oauth2 uses this client for the code exchange and for token refresh.
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: tokenRequestTimeout})
+	tok, scope, err := loadToken(tokenPath)
 	if err != nil {
 		if !errors.Is(err, errNeedLogin) {
 			return nil, err
@@ -58,17 +114,24 @@ func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) 
 		if err != nil {
 			return nil, err
 		}
-		if err := saveToken(tokenPath, tok); err != nil {
+		scope = grantedScope(tok)
+		if err := checkScope(scope); err != nil {
+			return nil, err
+		}
+		if err := saveToken(tokenPath, tok, scope); err != nil {
 			return nil, err
 		}
 	}
-	src := &persistSource{src: cfg.TokenSource(ctx, tok), path: tokenPath}
-	return oauth2.NewClient(ctx, src), nil
+	src := &persistSource{src: cfg.TokenSource(ctx, tok), path: tokenPath, scope: scope}
+	hc := oauth2.NewClient(ctx, src)
+	hc.Timeout = apiRequestTimeout
+	return hc, nil
 }
 
 type persistSource struct {
-	src  oauth2.TokenSource
-	path string
+	src   oauth2.TokenSource
+	path  string
+	scope string
 }
 
 func (p *persistSource) Token() (*oauth2.Token, error) {
@@ -76,10 +139,28 @@ func (p *persistSource) Token() (*oauth2.Token, error) {
 	if err != nil {
 		return nil, wrapRefreshError(err)
 	}
-	if err := saveToken(p.path, tok); err != nil {
+	if s := grantedScope(tok); s != "" {
+		p.scope = s
+	}
+	if err := saveToken(p.path, tok, p.scope); err != nil {
 		return nil, err
 	}
 	return tok, nil
+}
+
+// grantedScope is the space-separated scope list from Google's token reply.
+func grantedScope(tok *oauth2.Token) string {
+	s, _ := tok.Extra("scope").(string)
+	return s
+}
+
+// checkScope rejects a sign-in where the user did not allow Gmail access.
+// An empty scope means that Google did not say, so it is accepted.
+func checkScope(scope string) error {
+	if scope == "" || slices.Contains(strings.Fields(scope), gmailapi.GmailReadonlyScope) {
+		return nil
+	}
+	return fmt.Errorf("Google did not give Gmail read access. Sign in again, and on the Google page keep the box that allows this app to read your email")
 }
 
 func wrapRefreshError(err error) error {
@@ -103,26 +184,33 @@ func isInvalidGrant(err error) bool {
 	return json.Unmarshal(re.Body, &payload) == nil && payload.Error == "invalid_grant"
 }
 
-func loadToken(path string) (*oauth2.Token, error) {
+// storedToken is the token file: the oauth2 token plus the granted scope,
+// which oauth2.Token does not keep.
+type storedToken struct {
+	oauth2.Token
+	Scope string `json:"scope,omitempty"`
+}
+
+func loadToken(path string) (*oauth2.Token, string, error) {
 	b, err := privfile.Read(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, errNeedLogin
+			return nil, "", errNeedLogin
 		}
-		return nil, err
+		return nil, "", err
 	}
-	var tok oauth2.Token
-	if err := json.Unmarshal(b, &tok); err != nil {
-		return nil, errNeedLogin
+	var st storedToken
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, "", errNeedLogin
 	}
-	if !tok.Valid() && tok.RefreshToken == "" {
-		return nil, errNeedLogin
+	if !st.Valid() && st.RefreshToken == "" {
+		return nil, "", errNeedLogin
 	}
-	return &tok, nil
+	return &st.Token, st.Scope, nil
 }
 
-func saveToken(path string, tok *oauth2.Token) error {
-	b, err := json.MarshalIndent(tok, "", "  ")
+func saveToken(path string, tok *oauth2.Token, scope string) error {
+	b, err := json.MarshalIndent(storedToken{Token: *tok, Scope: scope}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -136,7 +224,7 @@ type loginIO struct {
 }
 
 func login(ctx context.Context, cfg *oauth2.Config, port int) (*oauth2.Token, error) {
-	return doLogin(ctx, cfg, port, loginIO{in: os.Stdin, out: os.Stderr, open: openBrowser})
+	return doLogin(ctx, cfg, port, loginIO{in: os.Stdin, out: os.Stderr, open: openurl.Open})
 }
 
 type loginResult struct {
@@ -157,7 +245,8 @@ func doLogin(ctx context.Context, cfg *oauth2.Config, port int, seams loginIO) (
 	if !ok {
 		return nil, fmt.Errorf("oauth listen: unexpected addr %T", ln.Addr())
 	}
-	cfg = cloneConfig(cfg)
+	cp := *cfg
+	cfg = &cp
 	cfg.RedirectURL = fmt.Sprintf("http://127.0.0.1:%d/", addr.Port)
 
 	state, err := randomState()
@@ -371,13 +460,4 @@ func stateEq(a, b string) bool {
 
 func callbackPathOK(p string) bool {
 	return p == "/" || p == ""
-}
-
-func cloneConfig(cfg *oauth2.Config) *oauth2.Config {
-	cp := *cfg
-	return &cp
-}
-
-func openBrowser(url string) error {
-	return openurl.Open(url)
 }

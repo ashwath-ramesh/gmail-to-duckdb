@@ -4,49 +4,33 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/gmail"
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	mailsync "github.com/ashwath-ramesh/gmail-to-duckdb/internal/sync"
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/web"
 )
 
 func cmdSync(args []string, stdout, stderr io.Writer) error {
 	cf := globalFlags("sync")
 	full := cf.fs.Bool("full", false, "list mailbox and mark missing as deleted")
 	bodies := cf.fs.Bool("bodies", false, "fetch bodies for messages that lack them")
-	if err := parseFlags(cf.fs, args); err != nil {
+	if err := cf.parse(args); err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signalContext()
 	defer stop()
 	opt := mailsync.Options{Full: *full, Bodies: *bodies}
 
-	if _, err := web.ReadServeFile(*cf.db); err == nil {
-		c, err := web.Dial(*cf.db)
-		if err != nil {
-			return fmt.Errorf("serve is marked running but not reachable: %w", err)
-		}
-		defer c.Close()
-		_, err = c.SyncNow(ctx, opt)
-		return err
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("serve file present but unreadable: %w", err)
-	}
-
-	db, err := store.Open(*cf.db)
+	c, db, err := connect(*cf.db)
 	if err != nil {
+		return err
+	}
+	if c != nil {
+		_, err = c.SyncNow(ctx, opt)
 		return err
 	}
 	defer db.Close()
-	hc, err := auth.HTTPClient(ctx, *cf.creds, auth.TokenPath(*cf.db), *cf.oauthPort)
-	if err != nil {
-		return err
-	}
-	api, err := gmail.New(ctx, hc)
+	api, err := gmailAPI(ctx, *cf.creds, *cf.db, *cf.oauthPort)
 	if err != nil {
 		return err
 	}
@@ -56,4 +40,13 @@ func cmdSync(args []string, stdout, stderr io.Writer) error {
 		Log: func(format string, a ...any) { writeDiag(stderr, fmt.Sprintf(format, a...)) },
 	}
 	return r.Sync(ctx, opt)
+}
+
+// gmailAPI signs in (on first use) and returns a Gmail API client.
+func gmailAPI(ctx context.Context, creds, dbPath string, oauthPort int) (*gmail.Client, error) {
+	hc, err := auth.HTTPClient(ctx, creds, auth.TokenPath(dbPath), oauthPort)
+	if err != nil {
+		return nil, err
+	}
+	return gmail.New(ctx, hc)
 }

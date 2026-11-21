@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,3 +146,63 @@ type resetErr struct{}
 func (resetErr) Error() string   { return "read: connection reset by peer" }
 func (resetErr) Timeout() bool   { return false }
 func (resetErr) Temporary() bool { return true }
+
+func TestRetryCapsRetryAfter(t *testing.T) {
+	old := retries
+	t.Cleanup(func() { retries = old })
+	var slept []time.Duration
+	retries.attempts = 2
+	retries.sleep = func(ctx context.Context, d time.Duration) error {
+		slept = append(slept, d)
+		return nil
+	}
+	h := make(http.Header)
+	h.Set("Retry-After", "86400")
+	n := 0
+	_ = retry(context.Background(), func() error {
+		n++
+		if n < 2 {
+			return statusErr(429, "wait", h)
+		}
+		return nil
+	})
+	if len(slept) != 1 || slept[0] != maxRetryAfter {
+		t.Fatalf("slept=%v want %v", slept, maxRetryAfter)
+	}
+}
+
+func TestRetryRetriesRequestTimeout(t *testing.T) {
+	old := retries
+	t.Cleanup(func() { retries = old })
+	retries.attempts = 3
+	retries.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+	timeout := &url.Error{Op: "Get", URL: "https://gmail.googleapis.com", Err: context.DeadlineExceeded}
+	n := 0
+	err := retry(context.Background(), func() error {
+		n++
+		if n < 3 {
+			return timeout
+		}
+		return nil
+	})
+	if err != nil || n != 3 {
+		t.Fatalf("a request timeout must retry: n=%d err=%v", n, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	n = 0
+	if err := retry(ctx, func() error { n++; return timeout }); err == nil || n > 1 {
+		t.Fatalf("a canceled sync must not retry: n=%d err=%v", n, err)
+	}
+}
+
+func TestStatusErrorHidesRawBody(t *testing.T) {
+	body := `{"error":{"code":403,"message":"Request had insufficient authentication scopes.","status":"PERMISSION_DENIED","details":[{"secret":"raw-detail-value"}]}}`
+	msg := statusErr(403, body, nil).Error()
+	if strings.Contains(msg, "raw-detail-value") || !strings.Contains(msg, "insufficient authentication scopes") {
+		t.Fatalf("error text %q", msg)
+	}
+	if msg := statusErr(500, "<html>proxy page with token=abc</html>", nil).Error(); msg != "http 500" {
+		t.Fatalf("non-JSON body leaked: %q", msg)
+	}
+}

@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -16,6 +17,22 @@ type ServeInfo struct {
 	URL   string `json:"url"`
 	Token string `json:"token"`
 	PID   int    `json:"pid"`
+	// DB is the absolute database path. Two databases with the same base
+	// name (mail.duckdb and mail.db) share one serve file name.
+	DB string `json:"db,omitempty"`
+}
+
+type otherDatabaseError struct{ serveDB, want string }
+
+func (e otherDatabaseError) Error() string {
+	return fmt.Sprintf("the serve file belongs to %s, not %s", e.serveDB, e.want)
+}
+
+// IsOtherDatabase reports whether a Dial error means that the serve file
+// belongs to a different database.
+func IsOtherDatabase(err error) bool {
+	var e otherDatabaseError
+	return errors.As(err, &e)
 }
 
 func ServePath(dbPath string) string {
@@ -46,6 +63,11 @@ func WriteServeFile(dbPath string, info ServeInfo) error {
 	if err := ValidateServeURL(info.URL); err != nil {
 		return err
 	}
+	abs, err := filepath.Abs(dbPath)
+	if err != nil {
+		return err
+	}
+	info.DB = abs
 	b, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		return err

@@ -49,22 +49,22 @@ func (d *DB) CommitSyncPage(ctx context.Context, p PageCommit) error {
 				return err
 			}
 		}
-		if err := applyStateTx(ctx, tx, "list_page_token", p.ListPage); err != nil {
+		if err := applyStateTx(ctx, tx, StateListPage, p.ListPage); err != nil {
 			return err
 		}
-		if err := applyStateTx(ctx, tx, "history_page_token", p.HistoryPage); err != nil {
+		if err := applyStateTx(ctx, tx, StateHistoryPage, p.HistoryPage); err != nil {
 			return err
 		}
-		if err := applyStateTx(ctx, tx, "history_start_id", p.HistoryStart); err != nil {
+		if err := applyStateTx(ctx, tx, StateHistoryStart, p.HistoryStart); err != nil {
 			return err
 		}
-		if err := applyStateTx(ctx, tx, "history_id", p.HistoryID); err != nil {
+		if err := applyStateTx(ctx, tx, StateHistoryID, p.HistoryID); err != nil {
 			return err
 		}
-		if err := applyStateTx(ctx, tx, "full_phase", p.FullPhase); err != nil {
+		if err := applyStateTx(ctx, tx, StateFullPhase, p.FullPhase); err != nil {
 			return err
 		}
-		return applyStateTx(ctx, tx, "full_start_history_id", p.FullStartID)
+		return applyStateTx(ctx, tx, StateFullStart, p.FullStartID)
 	})
 	if err == nil && changed {
 		d.notifyIndex()

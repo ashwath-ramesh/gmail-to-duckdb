@@ -23,14 +23,16 @@ import (
 )
 
 type Server struct {
-	DB           *store.DB
-	Token        string
-	FetchBody    func(ctx context.Context, id string) error
-	Sync         func(ctx context.Context, opt mailsync.Options) error
+	DB        *store.DB
+	Token     string
+	FetchBody func(ctx context.Context, id string) error
+	Sync      func(ctx context.Context, opt mailsync.Options) error
+	// NoSyncReason tells the user why Sync is nil (for example a failed sign-in).
+	NoSyncReason string
 	SyncCtx      context.Context
-	AllowDuckUI  bool
 	AllowedHosts []string
-	rt           runtime
+	rt           serverState
+	login        loginCodes
 }
 
 func AllowedHosts(port int) []string {
@@ -63,36 +65,44 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/messages/{id}/body", s.body)
 	mux.HandleFunc("GET /api/stats", s.listStats)
 	mux.HandleFunc("GET /api/stats/{name}", s.stat)
-	mux.HandleFunc("POST /api/duckdb-ui", s.duckUI)
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("GET /api/schema", s.schema)
 	mux.HandleFunc("POST /api/sql", s.sql)
 	mux.HandleFunc("POST /api/sync", s.syncNow)
+	mux.HandleFunc("POST /api/login", s.loginExchange)
+	mux.HandleFunc("POST /api/login-code", s.loginCode)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		if !loopbackOnly(r) || !s.allowHost(r) || !s.allowOrigin(r) || !s.allowFetchSite(r) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		if !loopbackOnly(r) || !s.allowHost(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") && !s.validToken(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+		// "/" and "/static/" hold only the embedded app. They have no mail data and
+		// no secret, so a navigation from the launcher file (cross-site) can load them.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			h.Set("Cache-Control", "no-store")
+			if !s.allowOrigin(r) || !s.allowFetchSite(r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			if r.URL.Path != "/api/login" && !s.validToken(r) {
+				writeErr(w, errUnauthorized, http.StatusUnauthorized)
+				return
+			}
 		}
 		mux.ServeHTTP(w, r)
 	})
 }
 
+// validToken accepts only the X-Token header. A browser cannot add a custom
+// header to a cross-site request, and cookies would leak to other local ports.
 func (s *Server) validToken(r *http.Request) bool {
-	if s.Token == "" {
-		return false
-	}
-	if tokenEq(r.Header.Get("X-Token"), s.Token) {
-		return true
-	}
-	c, err := r.Cookie("session")
-	return err == nil && tokenEq(c.Value, s.Token)
+	return s.Token != "" && tokenEq(r.Header.Get("X-Token"), s.Token)
 }
 
 func tokenEq(got, want string) bool {
@@ -119,14 +129,6 @@ func Serve(ctx context.Context, ln net.Listener, h http.Handler) error {
 	return err
 }
 
-func ListenAndServe(ctx context.Context, port string, h http.Handler) error {
-	ln, err := Listen(port)
-	if err != nil {
-		return err
-	}
-	return Serve(ctx, ln, h)
-}
-
 func Addr(port string) string {
 	return "http://127.0.0.1:" + port
 }
@@ -137,15 +139,6 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if s.Token != "" {
-		http.SetCookie(w, &http.Cookie{
-			Name:     "session",
-			Value:    s.Token,
-			Path:     "/",
-			HttpOnly: true,
-			SameSite: http.SameSiteStrictMode,
-		})
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(b)
 }
@@ -154,8 +147,6 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := store.ListFilter{
 		Unread: q.Get("unread") == "1",
-		Label:  q.Get("label"),
-		From:   q.Get("from"),
 		Query:  q.Get("q"),
 		Limit:  50,
 	}
@@ -168,10 +159,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if v := q.Get("offset"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			if n > 5000 {
-				n = 5000
-			}
-			f.Offset = n
+			f.Offset = n // ListMessages caps it.
 		}
 	}
 	msgs, err := s.DB.ListMessages(r.Context(), f)
@@ -183,11 +171,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, code)
 		return
 	}
-	env, err := s.liveStatus(r.Context())
-	if err != nil {
-		writeErr(w, err, http.StatusInternalServerError)
-		return
-	}
+	env := s.liveStatus()
 	out := make([]query.Message, 0, len(msgs))
 	for _, m := range msgs {
 		out = append(out, query.MessageFromStore(m, false))
@@ -217,11 +201,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	env, err := s.liveStatus(r.Context())
-	if err != nil {
-		writeErr(w, err, http.StatusInternalServerError)
-		return
-	}
+	env := s.liveStatus()
 	writeJSON(w, env)
 }
 
@@ -249,7 +229,7 @@ func (s *Server) sql(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Write {
-		s.noteChange()
+		s.wakeStatus()
 	}
 	writeJSON(w, env)
 }
@@ -288,11 +268,7 @@ func (s *Server) syncNow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	env, err := s.liveStatus(r.Context())
-	if err != nil {
-		writeErr(w, err, http.StatusInternalServerError)
-		return
-	}
+	env := s.liveStatus()
 	writeJSON(w, env)
 }
 
@@ -314,7 +290,7 @@ func (s *Server) body(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, code)
 		return
 	}
-	s.noteChange()
+	s.wakeStatus()
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -345,28 +321,6 @@ func (s *Server) stat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, res)
 }
 
-func (s *Server) duckUI(w http.ResponseWriter, r *http.Request) {
-	if !s.AllowDuckUI {
-		writeErr(w, errNoDuckUI, http.StatusBadRequest)
-		return
-	}
-	if _, err := s.DB.SQL().ExecContext(r.Context(), "CALL start_ui_server()"); err != nil {
-		writeErr(w, err, http.StatusInternalServerError)
-		return
-	}
-	_ = s.DB.DisableSearchAccel(r.Context())
-	s.noteChange()
-	var u string
-	if err := s.DB.SQL().QueryRowContext(r.Context(), "CALL get_ui_url()").Scan(&u); err != nil || u == "" {
-		if err == nil {
-			err = errNoUIURL
-		}
-		writeErr(w, err, http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]string{"url": u})
-}
-
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -378,9 +332,8 @@ func writeErr(w http.ResponseWriter, err error, code int) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 }
 
+var errUnauthorized = errString("unauthorized: send the X-Token from the serve file, or open a new login link with gmail-to-duckdb ui")
 var errNoFetch = errString("credentials not loaded; run sync or pass --credentials")
-var errNoDuckUI = errString("DuckDB UI is disabled; pass --duckdb-ui to serve")
-var errNoUIURL = errString("DuckDB UI URL unavailable")
 
 type errString string
 

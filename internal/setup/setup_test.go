@@ -54,19 +54,25 @@ func TestInitAndDoctor(t *testing.T) {
 	if _, err := os.Stat(cfg.Credentials); err != nil {
 		t.Fatal(err)
 	}
-	got := config.Load()
+	got, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.Credentials != cfg.Credentials {
 		t.Fatalf("%+v", got)
 	}
 	env := Doctor(context.Background(), cfg)
-	if DoctorOK(env) {
-		t.Fatal("doctor should fail before token and db exist")
+	if !DoctorOK(env) {
+		t.Fatalf("a fresh install must pass with pending checks: %+v", env.Checks)
 	}
 	var names []string
 	for _, c := range env.Checks {
 		names = append(names, c.Name)
 		if c.Name == "credentials" && !c.OK {
 			t.Fatalf("credentials: %+v", c)
+		}
+		if (c.Name == "token" || c.Name == "database") && (!c.Pending || c.OK) {
+			t.Fatalf("%s must be pending before the first sign-in: %+v", c.Name, c)
 		}
 	}
 	if len(names) < 5 {
@@ -240,7 +246,7 @@ func TestDoctorAcceptsPrivateToken(t *testing.T) {
 	t.Fatal("missing token check")
 }
 
-func TestDoctorStaleServeDoesNotOpenDB(t *testing.T) {
+func TestDoctorReportsStaleServe(t *testing.T) {
 	dir := t.TempDir()
 	if runtime.GOOS == "windows" {
 		dir = filepath.Join(dir, "db")
@@ -262,20 +268,21 @@ func TestDoctorStaleServeDoesNotOpenDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := Doctor(context.Background(), config.Config{DB: dbPath, Port: "9090", OAuthPort: 41807})
-	var dbCheck bool
+	seen := map[string]bool{}
 	for _, c := range env.Checks {
-		if c.Name == "database" {
-			dbCheck = true
-			if c.OK || !strings.Contains(c.Detail, "not reachable") {
-				t.Fatalf("%+v", c)
-			}
+		seen[c.Name] = true
+		if c.Name == "database" && !c.OK {
+			t.Fatalf("a stopped serve does not hold the database: %+v", c)
 		}
-		if c.Name == "ui_port" && !strings.Contains(c.Detail, ":1") && !strings.Contains(c.Detail, "1") {
-			// serve file port 1 overrides 9090
+		if c.Name == "serve" && (!c.OK || !strings.Contains(c.Detail, "stale")) {
+			t.Fatalf("%+v", c)
 		}
 	}
-	if !dbCheck {
-		t.Fatal("missing database check")
+	if !seen["database"] || !seen["serve"] {
+		t.Fatalf("checks %+v", env.Checks)
+	}
+	if _, err := os.Stat(web.ServePath(dbPath)); err != nil {
+		t.Fatalf("doctor must not change files: %v", err)
 	}
 }
 
