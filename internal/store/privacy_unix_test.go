@@ -230,3 +230,43 @@ func TestOpenRejectsForeignOwner(t *testing.T) {
 		t.Fatal("unowned file changed")
 	}
 }
+
+func TestParentOwnerRule(t *testing.T) {
+	cases := []struct {
+		uid  uint32
+		euid int
+		ok   bool
+	}{
+		{1000, 1000, true}, // your own directory
+		{0, 1000, true},    // root's directory, for example /srv
+		{1001, 1000, false},
+		{65534, 1000, false},
+		{0, 0, true},
+	}
+	for _, c := range cases {
+		if got := parentOwnerOK(c.uid, c.euid); got != c.ok {
+			t.Fatalf("parentOwnerOK(%d, %d) = %v, want %v", c.uid, c.euid, got, c.ok)
+		}
+	}
+}
+
+func TestOpenRejectsParentOfOtherUser(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("need root to chown")
+	}
+	parent := filepath.Join(t.TempDir(), "theirs")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(parent, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(filepath.Join(parent, "mail.duckdb"))
+	if err == nil {
+		_ = db.Close()
+		t.Fatal("expected a reject for a parent that another user owns")
+	}
+	if !strings.Contains(err.Error(), "belongs to another user") {
+		t.Fatalf("err = %v", err)
+	}
+}
