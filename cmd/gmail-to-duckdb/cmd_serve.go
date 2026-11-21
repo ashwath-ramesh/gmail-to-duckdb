@@ -7,9 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/config"
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/gmail"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/openurl"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	mailsync "github.com/ashwath-ramesh/gmail-to-duckdb/internal/sync"
@@ -18,10 +15,9 @@ import (
 
 func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	cf := globalFlags("serve")
-	cfg := config.Load()
-	port := cf.fs.String("port", cfg.Port, "local port")
+	port := cf.fs.String("port", cf.cfg.Port, "local port")
 	every := cf.fs.String("sync-every", "", "incremental sync interval (e.g. 5m)")
-	if err := parseFlags(cf.fs, args); err != nil {
+	if err := cf.parse(args); err != nil {
 		return err
 	}
 	if !asServe {
@@ -59,23 +55,22 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 		stop()
 		s.WaitIdle()
 	}()
-	if hc, err := auth.HTTPClient(ctx, *cf.creds, auth.TokenPath(*cf.db), *cf.oauthPort); err == nil {
-		if api, err := gmail.New(ctx, hc); err == nil {
-			s.FetchBody = func(ctx context.Context, id string) error {
-				return mailsync.FetchOnDemand(ctx, db, api, id)
+	if api, err := gmailAPI(ctx, *cf.creds, *cf.db, *cf.oauthPort); err == nil {
+		s.FetchBody = func(ctx context.Context, id string) error {
+			return mailsync.FetchOnDemand(ctx, db, api, id)
+		}
+		s.Sync = func(ctx context.Context, opt mailsync.Options) error {
+			r := &mailsync.Runner{
+				DB:         db,
+				API:        api,
+				Log:        func(format string, a ...any) { writeDiag(stderr, fmt.Sprintf(format, a...)) },
+				OnProgress: s.SetProgress,
 			}
-			s.Sync = func(ctx context.Context, opt mailsync.Options) error {
-				r := &mailsync.Runner{
-					DB:         db,
-					API:        api,
-					Log:        func(format string, a ...any) { writeDiag(stderr, fmt.Sprintf(format, a...)) },
-					OnProgress: s.SetProgress,
-				}
-				return r.Sync(ctx, opt)
-			}
+			return r.Sync(ctx, opt)
 		}
 	} else {
-		writeDiag(stderr, fmt.Sprintf("gmail client disabled: %v", err))
+		s.NoSyncReason = "Gmail sign-in failed: " + err.Error()
+		writeDiag(stderr, "sync is off: "+s.NoSyncReason)
 	}
 
 	ln, err := web.Listen(*port)

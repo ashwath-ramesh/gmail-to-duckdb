@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -13,7 +14,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) error {
 	cf := globalFlags("sync")
 	full := cf.fs.Bool("full", false, "list mailbox and mark missing as deleted")
 	bodies := cf.fs.Bool("bodies", false, "fetch bodies for messages that lack them")
-	if err := parseFlags(cf.fs, args); err != nil {
+	if err := cf.parse(args); err != nil {
 		return err
 	}
 	ctx, stop := signalContext()
@@ -29,11 +30,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer db.Close()
-	hc, err := auth.HTTPClient(ctx, *cf.creds, auth.TokenPath(*cf.db), *cf.oauthPort)
-	if err != nil {
-		return err
-	}
-	api, err := gmail.New(ctx, hc)
+	api, err := gmailAPI(ctx, *cf.creds, *cf.db, *cf.oauthPort)
 	if err != nil {
 		return err
 	}
@@ -43,4 +40,13 @@ func cmdSync(args []string, stdout, stderr io.Writer) error {
 		Log: func(format string, a ...any) { writeDiag(stderr, fmt.Sprintf(format, a...)) },
 	}
 	return r.Sync(ctx, opt)
+}
+
+// gmailAPI signs in (on first use) and returns a Gmail API client.
+func gmailAPI(ctx context.Context, creds, dbPath string, oauthPort int) (*gmail.Client, error) {
+	hc, err := auth.HTTPClient(ctx, creds, auth.TokenPath(dbPath), oauthPort)
+	if err != nil {
+		return nil, err
+	}
+	return gmail.New(ctx, hc)
 }

@@ -96,6 +96,13 @@ func TestCLIDialsServe(t *testing.T) {
 	if !strings.Contains(string(raw), "invoice") || !strings.Contains(string(raw), "secret") {
 		t.Fatalf("payload %s", raw)
 	}
+	out.Reset()
+	if err := run([]string{"gmail-to-duckdb", "sql", "--db", dbPath, "SELECT 1700000000000 AS n"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "1700000000000") {
+		t.Fatalf("large integer lost through serve: %q", out.String())
+	}
 }
 
 func TestCLIRecoversStaleServe(t *testing.T) {

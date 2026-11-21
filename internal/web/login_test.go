@@ -181,3 +181,17 @@ func TestHTMLBodyRendersInSandbox(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncOffShowsReason(t *testing.T) {
+	s, _ := testServer(t)
+	s.NoSyncReason = "Gmail sign-in failed: oauth: access_denied"
+	h := s.Handler()
+	w := req(t, h, http.MethodPost, "/api/sync")
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "access_denied") {
+		t.Fatalf("sync %d %s", w.Code, w.Body.String())
+	}
+	w = req(t, h, http.MethodGet, "/api/status")
+	if !strings.Contains(w.Body.String(), "access_denied") {
+		t.Fatalf("status must show why sync is off: %s", w.Body.String())
+	}
+}

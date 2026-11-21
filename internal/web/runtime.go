@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 
 var (
 	errSyncBusy = errors.New("sync already running")
-	errNoSync   = errors.New("sync is not configured; pass --credentials")
+	errNoSync   = errors.New("sync is off")
 )
 
 type runtime struct {
@@ -135,7 +136,7 @@ func (s *Server) refreshStatus(ctx context.Context) {
 
 func (s *Server) beginSync() error {
 	if s.Sync == nil {
-		return errNoSync
+		return fmt.Errorf("%w: %s", errNoSync, s.noSyncReason())
 	}
 	s.rt.mu.Lock()
 	defer s.rt.mu.Unlock()
@@ -192,6 +193,8 @@ func (s *Server) liveStatus(ctx context.Context) (query.Envelope, error) {
 		}
 		if s.rt.syncErr != "" {
 			env.LastError = s.rt.syncErr
+		} else if s.NoSyncReason != "" {
+			env.LastError = s.NoSyncReason
 		}
 		return env, nil
 	}
@@ -207,6 +210,8 @@ func (s *Server) liveStatus(ctx context.Context) (query.Envelope, error) {
 	}
 	if s.rt.syncErr != "" {
 		env.LastError = s.rt.syncErr
+	} else if s.NoSyncReason != "" {
+		env.LastError = s.NoSyncReason
 	}
 	return env, nil
 }
@@ -229,4 +234,11 @@ func (s *Server) WaitSync(ctx context.Context, opt mailsync.Options) error {
 	err := s.doSync(ctx, opt)
 	s.endSync(err)
 	return err
+}
+
+func (s *Server) noSyncReason() string {
+	if s.NoSyncReason != "" {
+		return s.NoSyncReason
+	}
+	return "no Gmail credentials; pass --credentials"
 }

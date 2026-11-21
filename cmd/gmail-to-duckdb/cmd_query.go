@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
 )
@@ -11,7 +12,7 @@ import (
 func cmdStatus(args []string, stdout io.Writer) error {
 	cf := globalFlags("status")
 	asJSON := cf.fs.Bool("json", false, "JSON envelope")
-	if err := parseFlags(cf.fs, args); err != nil {
+	if err := cf.parse(args); err != nil {
 		return err
 	}
 	return withAccess(*cf.db, func(a query.Access) error {
@@ -26,11 +27,11 @@ func cmdStatus(args []string, stdout io.Writer) error {
 func cmdSearch(args []string, stdout io.Writer) error {
 	cf := globalFlags("search")
 	asJSON := cf.fs.Bool("json", false, "JSON envelope")
-	if err := parseFlags(cf.fs, args); err != nil {
+	if err := cf.parse(args); err != nil {
 		return err
 	}
-	q := cf.fs.Arg(0)
-	if q == "" {
+	q := strings.Join(cf.fs.Args(), " ")
+	if strings.TrimSpace(q) == "" {
 		return fmt.Errorf("search requires a query")
 	}
 	return withAccess(*cf.db, func(a query.Access) error {
@@ -46,7 +47,7 @@ func cmdGet(args []string, stdout io.Writer) error {
 	cf := globalFlags("get")
 	asJSON := cf.fs.Bool("json", false, "JSON envelope")
 	body := cf.fs.Bool("body", false, "include untrusted email body")
-	if err := parseFlags(cf.fs, args); err != nil {
+	if err := cf.parse(args); err != nil {
 		return err
 	}
 	id := cf.fs.Arg(0)
@@ -65,7 +66,7 @@ func cmdGet(args []string, stdout io.Writer) error {
 func cmdSchema(args []string, stdout io.Writer) error {
 	cf := globalFlags("schema")
 	asJSON := cf.fs.Bool("json", false, "JSON envelope")
-	if err := parseFlags(cf.fs, args); err != nil {
+	if err := cf.parse(args); err != nil {
 		return err
 	}
 	return withAccess(*cf.db, func(a query.Access) error {
@@ -83,7 +84,7 @@ func cmdSQL(args []string, stdin io.Reader, stdout io.Writer) error {
 	write := cf.fs.Bool("write", false, "allow database DML/DDL (no files, attachments, or settings)")
 	_ = cf.fs.Bool("read-only", false, "explicit read-only (default)")
 	format := cf.fs.String("format", "", "json or table")
-	if err := parseFlags(cf.fs, args); err != nil {
+	if err := cf.parse(args); err != nil {
 		return err
 	}
 	if *format == "json" {

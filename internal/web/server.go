@@ -23,10 +23,12 @@ import (
 )
 
 type Server struct {
-	DB           *store.DB
-	Token        string
-	FetchBody    func(ctx context.Context, id string) error
-	Sync         func(ctx context.Context, opt mailsync.Options) error
+	DB        *store.DB
+	Token     string
+	FetchBody func(ctx context.Context, id string) error
+	Sync      func(ctx context.Context, opt mailsync.Options) error
+	// NoSyncReason tells the user why Sync is nil (for example a failed sign-in).
+	NoSyncReason string
 	SyncCtx      context.Context
 	AllowedHosts []string
 	rt           runtime

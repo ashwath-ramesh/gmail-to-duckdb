@@ -155,5 +155,8 @@ func (c *Client) send(ctx context.Context, method, path string, q url.Values, bo
 		}
 		return fmt.Errorf("%s", e.Error)
 	}
-	return json.Unmarshal(b, out)
+	// UseNumber keeps large integers exact (1700000000000, not 1.7e+12).
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	return dec.Decode(out)
 }
