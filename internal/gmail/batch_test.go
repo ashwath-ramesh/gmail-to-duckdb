@@ -1,6 +1,11 @@
 package gmail
 
 import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -274,4 +279,40 @@ func part(cid string, code int, body string) string {
 		"Content-Type: application/json\r\n" +
 		"\r\n" +
 		body + "\r\n"
+}
+
+func TestDecodeBatchLimits(t *testing.T) {
+	var many []string
+	for i := 0; i < 12; i++ {
+		many = append(many, part("response-9", 200, `{"id":"zzz"}`))
+	}
+	if _, err := decodeBatch(batchHTTP(many...), []string{"aaa"}); !errors.Is(err, errTooManyParts) {
+		t.Fatalf("12 parts for 1 id: err = %v", err)
+	}
+	big := `{"id":"aaa","snippet":"` + strings.Repeat("x", maxReplyBytes) + `"}`
+	if _, err := decodeBatch(batchHTTP(part("response-0", 200, big)), []string{"aaa"}); !errors.Is(err, errReplyTooLarge) {
+		t.Fatalf("oversize part: err = %v", err)
+	}
+}
+
+func TestGetRejectsOversizeReply(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"m1","snippet":"`)
+		_, _ = io.Copy(w, io.LimitReader(zeros{}, maxReplyBytes))
+		_, _ = io.WriteString(w, `"}`)
+	}))
+	t.Cleanup(ts.Close)
+	c := testGmailClient(t, ts)
+	if _, err := c.Get(context.Background(), "m1", "full"); !errors.Is(err, errReplyTooLarge) {
+		t.Fatalf("err = %v, want errReplyTooLarge", err)
+	}
+}
+
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = '0'
+	}
+	return len(p), nil
 }

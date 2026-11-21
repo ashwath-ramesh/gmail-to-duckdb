@@ -71,7 +71,7 @@ func cmdGet(args []string, stdout io.Writer) error {
 	})
 }
 
-func cmdSQL(args []string, stdin io.Reader, stdout io.Writer) error {
+func cmdSQL(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cf := globalFlags("sql")
 	asJSON := cf.fs.Bool("json", false, "JSON envelope")
 	write := cf.fs.Bool("write", false, "allow database DML/DDL (no files, attachments, or settings)")
@@ -104,6 +104,9 @@ func cmdSQL(args []string, stdin io.Reader, stdout io.Writer) error {
 		env, err := a.SQL(context.Background(), q, *write)
 		if err != nil {
 			return err
+		}
+		if env.Truncated {
+			writeDiag(stderr, fmt.Sprintf("the result is too large: showing the first %d rows. Add a LIMIT or filters.", env.ResultCount))
 		}
 		if *asJSON {
 			return writeEnv(stdout, env, true)

@@ -23,12 +23,14 @@ Commands:
   get MESSAGE_ID [--body]     Show one message (--body: stored text only)
   schema [--json]             Database schema
   sql [--write] [--json]      Run SQL (read-only; --write is database-only)
+  logout                      Revoke Google access and delete the sign-in token
 
 Flags (most commands):
   --db PATH            DuckDB file (default mail.duckdb)
   --credentials PATH   OAuth client JSON (default credentials.json)
   --oauth-port N       OAuth callback port (default ` + strconv.Itoa(auth.DefaultOAuthPort) + `)
   --port N             Mail page port (serve, ui, doctor; default 8080)
+  --no-browser         Print links only, do not open a browser (serve, ui)
   --json               Machine-readable envelope
 `
 
@@ -49,7 +51,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	case "sync":
 		return cmdSync(args[2:], stdout, stderr)
 	case "sql":
-		return cmdSQL(args[2:], stdin, stdout)
+		return cmdSQL(args[2:], stdin, stdout, stderr)
 	case "ui":
 		return cmdServe(args[2:], false, stdout, stderr)
 	case "serve":
@@ -66,6 +68,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return cmdInit(args[2:], stdout)
 	case "doctor":
 		return cmdDoctor(args[2:], stdout)
+	case "logout":
+		return cmdLogout(args[2:], stdout)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return nil

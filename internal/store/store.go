@@ -90,6 +90,8 @@ type SQLResult struct {
 	Columns     []string `json:"columns"`
 	ColumnTypes []string `json:"column_types,omitempty"`
 	Rows        [][]any  `json:"rows"`
+	// Truncated is true when user SQL hit the row or byte limit.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 type Coverage struct {

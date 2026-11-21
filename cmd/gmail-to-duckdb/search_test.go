@@ -63,3 +63,21 @@ func TestInitPrintsServeAsNextStep(t *testing.T) {
 		t.Fatalf("config keeps a relative db path: %q", cfg.DB)
 	}
 }
+
+func TestSQLWarnsWhenResultIsTruncated(t *testing.T) {
+	dbPath := seedDB(t)
+	var out, errOut bytes.Buffer
+	if err := run([]string{"gmail-to-duckdb", "sql", "--db", dbPath, "--json", "SELECT i FROM range(200000) t(i)"}, strings.NewReader(""), &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	var env query.Envelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.Truncated || env.ResultCount != 100000 {
+		t.Fatalf("truncated=%v count=%d", env.Truncated, env.ResultCount)
+	}
+	if !strings.Contains(errOut.String(), "showing the first 100000 rows") {
+		t.Fatalf("stderr %q", errOut.String())
+	}
+}

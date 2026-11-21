@@ -19,7 +19,6 @@ import (
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/web"
-	gmailapi "google.golang.org/api/gmail/v1"
 )
 
 const SetupSteps = `Create a Google Cloud project.
@@ -227,7 +226,7 @@ func checkToken(path string) query.Check {
 		c.Detail = "missing refresh_token"
 		return c
 	}
-	if tok.Scope != "" && !slices.Contains(strings.Fields(tok.Scope), gmailapi.GmailReadonlyScope) {
+	if tok.Scope != "" && !slices.Contains(strings.Fields(tok.Scope), auth.GmailReadonlyScope) {
 		c.Detail = "token scope lacks gmail.readonly; remove the token file and sign in again"
 		return c
 	}

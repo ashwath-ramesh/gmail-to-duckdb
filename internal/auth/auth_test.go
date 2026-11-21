@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile/privtest"
 	"golang.org/x/oauth2"
 )
 
@@ -29,7 +30,7 @@ func TestWriteTokenMode(t *testing.T) {
 	if err := saveToken(path, &oauth2.Token{AccessToken: "x", RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, path)
+	privtest.AssertPrivate(t, path)
 }
 
 func TestSaveTokenReplacesPermissiveFile(t *testing.T) {
@@ -41,13 +42,13 @@ func TestSaveTokenReplacesPermissiveFile(t *testing.T) {
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := makePermissive(path); err != nil {
+	if err := privtest.MakePermissive(path); err != nil {
 		t.Fatal(err)
 	}
 	if err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, path)
+	privtest.AssertPrivate(t, path)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +83,7 @@ func TestPersistSourceWrapsInvalidGrant(t *testing.T) {
 		t.Fatal("must not start login")
 	}
 	msg := err.Error()
-	for _, need := range []string{"stop serve", "token file", "same account", "do not delete the database"} {
+	for _, need := range []string{"stop serve", "gmail-to-duckdb logout", "same account", "do not delete the database"} {
 		if !strings.Contains(strings.ToLower(msg), need) {
 			t.Fatalf("missing %q in %q", need, msg)
 		}
@@ -162,7 +163,7 @@ func TestSaveTokenRejectsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, path); err != nil {
-		skipIfNoSymlink(t, err)
+		privtest.SkipIfNoSymlink(t, err)
 	}
 	if err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}, ""); err == nil {
 		t.Fatal("expected symlink reject")
@@ -184,7 +185,7 @@ func TestLoadTokenRejectsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, path); err != nil {
-		skipIfNoSymlink(t, err)
+		privtest.SkipIfNoSymlink(t, err)
 	}
 	if _, _, err := loadToken(path); err == nil {
 		t.Fatal("expected symlink reject")
@@ -219,7 +220,7 @@ func TestLoadTokenPrivacyError(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, path); err != nil {
-		skipIfNoSymlink(t, err)
+		privtest.SkipIfNoSymlink(t, err)
 	}
 	_, _, err := loadToken(path)
 	if err == nil {
@@ -242,11 +243,11 @@ func TestHTTPClientRejectsPrivateTokenError(t *testing.T) {
 	}
 	tokPath := filepath.Join(dir, "mail.token.json")
 	if err := os.Symlink(target, tokPath); err != nil {
-		skipIfNoSymlink(t, err)
+		privtest.SkipIfNoSymlink(t, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	_, err := HTTPClient(ctx, cred, tokPath, freePort(t))
+	_, err := HTTPClient(ctx, cred, tokPath, freePort(t), false)
 	if err == nil {
 		t.Fatal("expected privacy error")
 	}
@@ -267,7 +268,7 @@ func TestHTTPClientReauthsMissingToken(t *testing.T) {
 	port := heldPort(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := HTTPClient(ctx, cred, filepath.Join(dir, "missing.token.json"), port)
+	_, err := HTTPClient(ctx, cred, filepath.Join(dir, "missing.token.json"), port, false)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want canceled login without listen, got %v", err)
 	}
@@ -286,7 +287,7 @@ func TestHTTPClientReauthsExpiredToken(t *testing.T) {
 	port := heldPort(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := HTTPClient(ctx, cred, tokPath, port)
+	_, err := HTTPClient(ctx, cred, tokPath, port, false)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want canceled login without listen, got %v", err)
 	}
@@ -301,17 +302,17 @@ func TestHTTPClientTightensCopiedCredentials(t *testing.T) {
 	if err := os.Chmod(cred, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := makePermissive(cred); err != nil {
+	if err := privtest.MakePermissive(cred); err != nil {
 		t.Fatal(err)
 	}
 	tokPath := filepath.Join(dir, "mail.token.json")
 	if err := saveToken(tokPath, &oauth2.Token{RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := HTTPClient(context.Background(), cred, tokPath, 41807); err != nil {
+	if _, err := HTTPClient(context.Background(), cred, tokPath, 41807, false); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, cred)
+	privtest.AssertPrivate(t, cred)
 }
 
 func TestFailedTokenReplaceLeavesPriorData(t *testing.T) {
@@ -320,15 +321,15 @@ func TestFailedTokenReplaceLeavesPriorData(t *testing.T) {
 	if err := saveToken(path, &oauth2.Token{AccessToken: "old", RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := makeDirNotCreatable(dir); err != nil {
+	if err := privtest.MakeDirNotCreatable(dir); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = restoreDirCreatable(dir) })
+	t.Cleanup(func() { _ = privtest.RestoreDirCreatable(dir) })
 	err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}, "")
 	if err == nil {
 		t.Fatal("expected replace failure")
 	}
-	if err := restoreDirCreatable(dir); err != nil {
+	if err := privtest.RestoreDirCreatable(dir); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(path)
@@ -342,7 +343,7 @@ func TestFailedTokenReplaceLeavesPriorData(t *testing.T) {
 	if tok.AccessToken != "old" {
 		t.Fatalf("prior data lost: %+v", tok)
 	}
-	assertNoTempFiles(t, dir)
+	privtest.AssertNoTempFiles(t, dir)
 }
 
 type stubTokenSource struct {
@@ -443,5 +444,25 @@ func TestCheckScope(t *testing.T) {
 	tok := (&oauth2.Token{AccessToken: "a"}).WithExtra(map[string]any{"scope": "openid"})
 	if grantedScope(tok) != "openid" {
 		t.Fatalf("scope %q", grantedScope(tok))
+	}
+}
+
+func TestDesktopConfigEndpoints(t *testing.T) {
+	cfg, err := desktopConfig([]byte(`{"installed":{"client_id":"id","client_secret":"sec"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Endpoint.AuthURL != googleAuthURL || cfg.Endpoint.TokenURL != googleTokenURL {
+		t.Fatalf("defaults %+v", cfg.Endpoint)
+	}
+	if cfg.ClientID != "id" || cfg.ClientSecret != "sec" || len(cfg.Scopes) != 1 || cfg.Scopes[0] != GmailReadonlyScope {
+		t.Fatalf("config %+v", cfg)
+	}
+	cfg, err = desktopConfig([]byte(desktopCreds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Endpoint.AuthURL != "https://accounts.google.com/o/oauth2/auth" || cfg.Endpoint.TokenURL != "https://oauth2.googleapis.com/token" {
+		t.Fatalf("from file %+v", cfg.Endpoint)
 	}
 }

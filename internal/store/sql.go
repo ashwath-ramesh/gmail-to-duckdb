@@ -4,7 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -18,17 +22,35 @@ func (d *DB) ExecSQL(ctx context.Context, query string) (SQLResult, error) {
 		return SQLResult{}, err
 	}
 	defer rows.Close()
-	return scanSQLResult(rows)
+	return scanSQLResult(rows, false)
 }
+
+// Limits for user SQL, so that one query cannot fill memory or hold the
+// database for a long time. Trusted embedded SQL (ExecSQL) has no limits.
+const (
+	MaxSQLRows  = 100_000
+	MaxSQLBytes = 64 << 20
+)
+
+var sqlTimeout = 5 * time.Minute
 
 func (d *DB) QuerySQL(ctx context.Context, query string, allowWrite bool) (SQLResult, error) {
 	if err := rejectSQLText(query); err != nil {
 		return SQLResult{}, err
 	}
+	qctx, cancel := context.WithTimeout(ctx, sqlTimeout)
+	defer cancel()
+	var res SQLResult
+	var err error
 	if allowWrite {
-		return d.querySQLWrite(ctx, query)
+		res, err = d.querySQLWrite(qctx, query)
+	} else {
+		res, err = d.querySQLRead(qctx, query)
 	}
-	return d.querySQLRead(ctx, query)
+	if err != nil && ctx.Err() == nil && errors.Is(qctx.Err(), context.DeadlineExceeded) {
+		return SQLResult{}, fmt.Errorf("SQL stopped after %s; add filters or a LIMIT", sqlTimeout)
+	}
+	return res, err
 }
 
 func (d *DB) querySQLRead(ctx context.Context, query string) (SQLResult, error) {
@@ -114,7 +136,7 @@ func querySQLTx(ctx context.Context, tx *sql.Tx, query string) (SQLResult, error
 }
 
 func finishSQLRows(rows *sql.Rows) (SQLResult, error) {
-	res, err := scanSQLResult(rows)
+	res, err := scanSQLResult(rows, true)
 	closeErr := rows.Close()
 	if err != nil {
 		return SQLResult{}, err
@@ -206,7 +228,9 @@ func discardConn(c *sql.Conn) {
 	_ = c.Raw(func(any) error { return driver.ErrBadConn })
 }
 
-func scanSQLResult(rows *sql.Rows) (SQLResult, error) {
+// scanSQLResult reads all rows. With limited, it stops at MaxSQLRows or
+// MaxSQLBytes and sets Truncated.
+func scanSQLResult(rows *sql.Rows, limited bool) (SQLResult, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return SQLResult{}, err
@@ -221,7 +245,12 @@ func scanSQLResult(rows *sql.Rows) (SQLResult, error) {
 		}
 	}
 	res := SQLResult{Columns: cols, ColumnTypes: types, Rows: [][]any{}}
+	size := 0
 	for rows.Next() {
+		if limited && len(res.Rows) == MaxSQLRows {
+			res.Truncated = true
+			break
+		}
 		raw := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
 		for i := range raw {
@@ -232,7 +261,15 @@ func scanSQLResult(rows *sql.Rows) (SQLResult, error) {
 		}
 		line := make([]any, len(cols))
 		for i, v := range raw {
+			if b, ok := v.([]byte); ok && types[i] == "UUID" && len(b) == 16 {
+				v = formatUUID(b)
+			}
 			line[i] = cellValue(v)
+			size += cellSize(line[i])
+		}
+		if limited && size > MaxSQLBytes {
+			res.Truncated = true
+			break
 		}
 		res.Rows = append(res.Rows, line)
 	}
@@ -255,17 +292,93 @@ func (r SQLResult) StringRows() [][]string {
 	return out
 }
 
+// cellValue turns a DuckDB value into one that encoding/json can always write.
 func cellValue(v any) any {
-	if v == nil {
-		return nil
-	}
 	switch t := v.(type) {
+	case nil:
+		return nil
 	case []byte:
 		return string(t)
 	case time.Time:
 		return t.UTC().Format(time.RFC3339)
+	case float64:
+		return finite(t)
+	case float32:
+		return finite(float64(t))
+	case duckdb.Decimal:
+		// An exact JSON number. The struct form is {"Width","Scale","Value"}.
+		return json.Number(t.String())
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = cellValue(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = cellValue(e)
+		}
+		return out
+	case duckdb.OrderedMap:
+		var out duckdb.OrderedMap
+		keys, vals := t.Keys(), t.Values()
+		for i := range keys {
+			out.Set(cellValue(keys[i]), cellValue(vals[i]))
+		}
+		return out
 	default:
 		return t
+	}
+}
+
+// finite keeps a float, or names NaN and infinity, which JSON cannot hold.
+func finite(f float64) any {
+	switch {
+	case math.IsNaN(f):
+		return "NaN"
+	case math.IsInf(f, 1):
+		return "Infinity"
+	case math.IsInf(f, -1):
+		return "-Infinity"
+	default:
+		return f
+	}
+}
+
+func formatUUID(b []byte) string {
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
+}
+
+// cellSize estimates the memory that one cell uses, for MaxSQLBytes.
+func cellSize(v any) int {
+	switch t := v.(type) {
+	case string:
+		return len(t) + 16
+	case json.Number:
+		return len(t) + 16
+	case []any:
+		n := 24
+		for _, e := range t {
+			n += cellSize(e)
+		}
+		return n
+	case map[string]any:
+		n := 48
+		for k, e := range t {
+			n += len(k) + cellSize(e)
+		}
+		return n
+	case duckdb.OrderedMap:
+		n := 48
+		keys, vals := t.Keys(), t.Values()
+		for i := range keys {
+			n += cellSize(keys[i]) + cellSize(vals[i])
+		}
+		return n
+	default:
+		return 16
 	}
 }
 

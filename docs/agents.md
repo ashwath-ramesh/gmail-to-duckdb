@@ -31,6 +31,8 @@ Search and `get` omit the body. Pass `get --body` only when you need it. `get --
 
 `search` returns at most 50 messages. `truncated` is true when the result filled that limit. To see more, narrow the query (for example with `after:` and `before:`), or use `sql`.
 
+`sql` returns at most 100,000 rows or about 64 MiB. `truncated` is true when the result hit that limit. A query stops after 5 minutes. Add `LIMIT` and filters.
+
 `doctor --json` uses the same envelope. Read `checks[]` for setup failures. A check with `"pending": true` is a step that has not happened yet, such as the first sign-in. It is not a failure.
 
 Human CLI output escapes terminal controls, bidi overrides and isolates, and invalid UTF-8. Table and metadata fields also escape embedded newlines and tabs, so only the formatter adds row breaks. Message bodies keep intended line breaks and tabs. JSON keeps the original values.

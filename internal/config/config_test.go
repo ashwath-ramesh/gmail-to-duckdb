@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile/privtest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,7 +24,7 @@ func TestWriteAndLoad(t *testing.T) {
 	if err := Write(want); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, Path())
+	privtest.AssertPrivate(t, Path())
 	got, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -41,14 +42,14 @@ func TestWriteReplacesPermissiveFile(t *testing.T) {
 	if err := os.WriteFile(Path(), []byte(`{"db":"old"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := makePermissive(Path()); err != nil {
+	if err := privtest.MakePermissive(Path()); err != nil {
 		t.Fatal(err)
 	}
 	want := Config{DB: "/tmp/mail.duckdb", Credentials: "/tmp/credentials.json", OAuthPort: 9, Port: "9090"}
 	if err := Write(want); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, Path())
+	privtest.AssertPrivate(t, Path())
 	got, err := Load()
 	if err != nil {
 		t.Fatal(err)

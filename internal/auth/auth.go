@@ -23,8 +23,6 @@ import (
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/openurl"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
-	gmailapi "google.golang.org/api/gmail/v1"
 )
 
 // DefaultOAuthPort is a fixed loopback port so a remote SSH tunnel can stay open.
@@ -45,11 +43,22 @@ func TokenPath(dbPath string) string {
 	return strings.TrimSuffix(dbPath, ext) + ".token.json"
 }
 
+// Google's OAuth endpoints, for a client file that does not name them.
+const (
+	googleAuthURL  = "https://accounts.google.com/o/oauth2/auth"
+	googleTokenURL = "https://oauth2.googleapis.com/token"
+)
+
 // CheckDesktopClient checks that raw is a Google OAuth Desktop client file.
-// The file names the OAuth endpoints, so they must be Google HTTPS hosts:
-// otherwise a changed file could send the sign-in code and the refresh token
-// to another server.
 func CheckDesktopClient(raw []byte) error {
+	_, err := desktopConfig(raw)
+	return err
+}
+
+// desktopConfig reads a Google OAuth Desktop client file. The file names the
+// OAuth endpoints, so they must be Google HTTPS hosts: otherwise a changed
+// file could send the sign-in code and the refresh token to another server.
+func desktopConfig(raw []byte) (*oauth2.Config, error) {
 	var doc struct {
 		Installed *struct {
 			ClientID     string `json:"client_id"`
@@ -59,25 +68,35 @@ func CheckDesktopClient(raw []byte) error {
 		} `json:"installed"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("credentials JSON: %w", err)
+		return nil, fmt.Errorf("credentials JSON: %w", err)
 	}
 	in := doc.Installed
 	if in == nil {
-		return fmt.Errorf("credentials must be a Desktop app client (key \"installed\")")
+		return nil, fmt.Errorf("credentials must be a Desktop app client (key \"installed\")")
 	}
 	if in.ClientID == "" || in.ClientSecret == "" {
-		return fmt.Errorf("credentials must have client_id and client_secret")
+		return nil, fmt.Errorf("credentials must have client_id and client_secret")
 	}
-	for name, v := range map[string]string{"auth_uri": in.AuthURI, "token_uri": in.TokenURI} {
-		if v == "" {
+	cfg := &oauth2.Config{
+		ClientID:     in.ClientID,
+		ClientSecret: in.ClientSecret,
+		Scopes:       []string{GmailReadonlyScope},
+		Endpoint:     oauth2.Endpoint{AuthURL: googleAuthURL, TokenURL: googleTokenURL},
+	}
+	for _, f := range []struct {
+		name, v string
+		dst     *string
+	}{{"auth_uri", in.AuthURI, &cfg.Endpoint.AuthURL}, {"token_uri", in.TokenURI, &cfg.Endpoint.TokenURL}} {
+		if f.v == "" {
 			continue
 		}
-		u, err := url.Parse(v)
+		u, err := url.Parse(f.v)
 		if err != nil || u.Scheme != "https" || u.User != nil || !googleOAuthHost(u.Host) {
-			return fmt.Errorf("credentials %s must be a Google https URL, got %q", name, v)
+			return nil, fmt.Errorf("credentials %s must be a Google https URL, got %q", f.name, f.v)
 		}
+		*f.dst = f.v
 	}
-	return nil
+	return cfg, nil
 }
 
 func googleOAuthHost(h string) bool {
@@ -88,17 +107,19 @@ func googleOAuthHost(h string) bool {
 	return false
 }
 
-func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) (*http.Client, error) {
+// GmailReadonlyScope is the only Google permission this tool asks for.
+const GmailReadonlyScope = "https://www.googleapis.com/auth/gmail.readonly"
+
+// HTTPClient returns a Gmail client. With no saved token, it signs in first;
+// browser tells it to open the Google page (it always prints the link).
+func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int, browser bool) (*http.Client, error) {
 	raw, err := privfile.Read(credPath)
 	if err != nil {
 		return nil, fmt.Errorf("read credentials %s: %w", credPath, err)
 	}
-	if err := CheckDesktopClient(raw); err != nil {
-		return nil, err
-	}
-	cfg, err := google.ConfigFromJSON(raw, gmailapi.GmailReadonlyScope)
+	cfg, err := desktopConfig(raw)
 	if err != nil {
-		return nil, fmt.Errorf("parse credentials: %w", err)
+		return nil, err
 	}
 	if oauthPort <= 0 {
 		oauthPort = DefaultOAuthPort
@@ -110,7 +131,7 @@ func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) 
 		if !errors.Is(err, errNeedLogin) {
 			return nil, err
 		}
-		tok, err = login(ctx, cfg, oauthPort)
+		tok, err = login(ctx, cfg, oauthPort, browser)
 		if err != nil {
 			return nil, err
 		}
@@ -157,7 +178,7 @@ func grantedScope(tok *oauth2.Token) string {
 // checkScope rejects a sign-in where the user did not allow Gmail access.
 // An empty scope means that Google did not say, so it is accepted.
 func checkScope(scope string) error {
-	if scope == "" || slices.Contains(strings.Fields(scope), gmailapi.GmailReadonlyScope) {
+	if scope == "" || slices.Contains(strings.Fields(scope), GmailReadonlyScope) {
 		return nil
 	}
 	return fmt.Errorf("Google did not give Gmail read access. Sign in again, and on the Google page keep the box that allows this app to read your email")
@@ -167,7 +188,7 @@ func wrapRefreshError(err error) error {
 	if !isInvalidGrant(err) {
 		return err
 	}
-	return fmt.Errorf("%w: stop serve, remove only the token file for this database, then run sync or sign in with the same account; do not delete the database or credentials", errInvalidGrant)
+	return fmt.Errorf("%w: stop serve, run gmail-to-duckdb logout, then start serve and sign in with the same account; do not delete the database or credentials", errInvalidGrant)
 }
 
 func isInvalidGrant(err error) bool {
@@ -223,8 +244,12 @@ type loginIO struct {
 	open func(string) error
 }
 
-func login(ctx context.Context, cfg *oauth2.Config, port int) (*oauth2.Token, error) {
-	return doLogin(ctx, cfg, port, loginIO{in: os.Stdin, out: os.Stderr, open: openurl.Open})
+func login(ctx context.Context, cfg *oauth2.Config, port int, browser bool) (*oauth2.Token, error) {
+	seams := loginIO{in: os.Stdin, out: os.Stderr}
+	if browser {
+		seams.open = openurl.Open
+	}
+	return doLogin(ctx, cfg, port, seams)
 }
 
 type loginResult struct {

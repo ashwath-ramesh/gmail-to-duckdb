@@ -30,7 +30,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer db.Close()
-	api, err := gmailAPI(ctx, *cf.creds, *cf.db, *cf.oauthPort)
+	api, err := gmailAPI(ctx, *cf.creds, *cf.db, *cf.oauthPort, true)
 	if err != nil {
 		return err
 	}
@@ -43,10 +43,10 @@ func cmdSync(args []string, stdout, stderr io.Writer) error {
 }
 
 // gmailAPI signs in (on first use) and returns a Gmail API client.
-func gmailAPI(ctx context.Context, creds, dbPath string, oauthPort int) (*gmail.Client, error) {
-	hc, err := auth.HTTPClient(ctx, creds, auth.TokenPath(dbPath), oauthPort)
+func gmailAPI(ctx context.Context, creds, dbPath string, oauthPort int, browser bool) (*gmail.Client, error) {
+	hc, err := auth.HTTPClient(ctx, creds, auth.TokenPath(dbPath), oauthPort, browser)
 	if err != nil {
 		return nil, err
 	}
-	return gmail.New(ctx, hc)
+	return gmail.New(hc), nil
 }

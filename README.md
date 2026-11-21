@@ -16,7 +16,7 @@ Gmail to DuckDB copies your Gmail into one file on your computer. You can then s
 You need:
 
 - A Gmail account (an `@gmail.com` account, or a Google Workspace account that your administrator allows).
-- A computer with one of these systems: macOS on Apple silicon (M1 or later), Linux on x86-64 or ARM64, or Windows on x86-64. Macs with an Intel processor are not supported.
+- A computer with one of these systems: macOS on Apple silicon (M1 or later), Linux on x86-64 or ARM64, or Windows on x86-64. A Mac with an Intel processor needs version 0.3.2 or later, and the download steps below (not Homebrew).
 - A terminal. On macOS, open **Terminal**. On Windows, open **PowerShell**. On Linux, open your terminal program.
 - Approximately 20 minutes.
 
@@ -47,14 +47,18 @@ mv gmail-to-duckdb ~/.local/bin/
 
 The `sha256sum` command must show `OK`. If it does not show `OK`, do not use the file.
 
-**macOS without Homebrew.**
+**macOS without Homebrew.** Type `uname -m`. If the result is `arm64`, use the commands below. If the result is `x86_64` (an Intel Mac), change `arm64` to `amd64` in the commands below.
 
 ```bash
 curl -LO https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/latest/download/gmail-to-duckdb-darwin-arm64.tar.gz
+curl -LO https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/latest/download/gmail-to-duckdb-darwin-arm64.tar.gz.sha256
+shasum -a 256 -c gmail-to-duckdb-darwin-arm64.tar.gz.sha256
 tar -xzf gmail-to-duckdb-darwin-arm64.tar.gz
 sudo mkdir -p /usr/local/bin
 sudo mv gmail-to-duckdb /usr/local/bin/
 ```
+
+The `shasum` command must show `OK`. If it does not show `OK`, do not use the file.
 
 If you downloaded the file with a web browser, macOS can block it. To unblock it, type `xattr -d com.apple.quarantine /usr/local/bin/gmail-to-duckdb`.
 
@@ -179,7 +183,7 @@ In the terminal, type `gmail-to-duckdb search "from:alice invoice"`. The termina
 
 | What you see | What to do |
 |---|---|
-| `invalid_grant` or `oauth refresh token rejected` | Google stopped your sign-in. This occurs after 7 days in Testing, after a password change, or when you remove access. Stop `serve`. Delete only the file `~/.local/share/gmail-to-duckdb/mail.token.json`. Start `serve` again and sign in with the same account. Do not delete the database. |
+| `invalid_grant` or `oauth refresh token rejected` | Google stopped your sign-in. This occurs after 7 days in Testing, after a password change, or when you remove access. Stop `serve`. Type `gmail-to-duckdb logout`. Start `serve` again and sign in with the same account. Do not delete the database. |
 | `Google did not give Gmail read access` | You cleared the Gmail box on the Google page. Start `serve` again. On the Google page, keep the box selected. |
 | `Error 403: access_denied` on the Google page | Your account is not a test user of an External app. Add it on the **Audience** page (Step 2), or use a Personal app. |
 | `Signed out. Open the link that serve printed` | Type `gmail-to-duckdb ui` to get a new link. |
@@ -189,13 +193,13 @@ In the terminal, type `gmail-to-duckdb search "from:alice invoice"`. The termina
 | macOS: "cannot be opened because Apple cannot check it" | Type `xattr -d com.apple.quarantine /usr/local/bin/gmail-to-duckdb`. |
 | Windows: "Windows protected your PC" | Type `Unblock-File $HOME\gmail-to-duckdb\gmail-to-duckdb.exe`. |
 
-**Use the tool on a remote computer.** Do this when the tool runs on a remote computer and your browser runs on your laptop. Before you start `serve`, connect with two SSH tunnels:
+**Use the tool on a remote computer.** Do this when the tool runs on a remote computer and your browser runs on your laptop. On your laptop, connect with two SSH tunnels:
 
 ```bash
 ssh -L 41807:127.0.0.1:41807 -L 8080:127.0.0.1:8080 USER@REMOTE
 ```
 
-Then copy the links from the remote terminal into your laptop browser. If the sign-in tab cannot connect, copy the full address from that tab. Paste it into the remote terminal, and push Enter.
+In that SSH session, type `gmail-to-duckdb serve --sync-every 5m --no-browser`. Then copy the links from the remote terminal into your laptop browser. If the sign-in tab cannot connect, copy the full address from that tab. Paste it into the remote terminal, and push Enter.
 
 ## Privacy and safety
 
@@ -206,12 +210,12 @@ CAUTION: On a shared computer, an administrator can read your mail copy. Do not 
 
 - Do not share these files, and do not put them in Git or a cloud folder: `credentials.json`, `*.token.json`, `*.serve.json`, `*.duckdb`, and `*.duckdb.search`.
 
-**Remove all local data.** Stop `serve`. Then delete these two folders:
+**Sign out.** Stop `serve`. Then type `gmail-to-duckdb logout`. This removes the access of the tool to your Google account, and deletes the sign-in token on this computer. Your mail copy stays. If `logout` shows an error, open [myaccount.google.com/permissions](https://myaccount.google.com/permissions). Select the app that you made in Step 2, and then click **Remove access**.
+
+**Remove all local data.** Sign out first. Then delete these two folders:
 
 - `~/.config/gmail-to-duckdb/`
 - `~/.local/share/gmail-to-duckdb/`
-
-To also remove its access to your Google account, open [myaccount.google.com/permissions](https://myaccount.google.com/permissions). Select the app that you made in Step 2, and then click **Remove access**.
 
 Full protection details: [docs/security.md](docs/security.md).
 

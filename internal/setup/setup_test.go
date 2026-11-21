@@ -11,6 +11,7 @@ import (
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/config"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile/privtest"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/web"
 )
@@ -158,7 +159,7 @@ func TestInitReplacesPermissiveCopiedCredentials(t *testing.T) {
 	if err := os.WriteFile(dest, []byte(`{"installed":{"client_id":"old"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := makePermissive(dest); err != nil {
+	if err := privtest.MakePermissive(dest); err != nil {
 		t.Fatal(err)
 	}
 	src := filepath.Join(t.TempDir(), "credentials.json")
@@ -169,7 +170,7 @@ func TestInitReplacesPermissiveCopiedCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, cfg.Credentials)
+	privtest.AssertPrivate(t, cfg.Credentials)
 	got, err := os.ReadFile(cfg.Credentials)
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +196,7 @@ func TestDoctorRejectsPermissiveToken(t *testing.T) {
 	if err := os.WriteFile(path, []byte(tok), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := makePermissive(path); err != nil {
+	if err := privtest.MakePermissive(path); err != nil {
 		t.Fatal(err)
 	}
 	env := Doctor(context.Background(), cfg)

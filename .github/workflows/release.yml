@@ -10,24 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  govulncheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: go.mod
-      - name: Test
-        env:
-          CGO_ENABLED: 1
-        run: go test ./...
-      - name: Vet
-        run: go vet ./...
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+  # Pull requests already run test.yml by itself.
+  test:
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/test.yml
 
   build:
-    needs: govulncheck
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +29,10 @@ jobs:
           - os: macos-latest
             goos: darwin
             goarch: arm64
+          # The last Intel macOS image; GitHub supports it until fall 2027.
+          - os: macos-15-intel
+            goos: darwin
+            goarch: amd64
           - os: windows-latest
             goos: windows
             goarch: amd64
@@ -95,11 +87,14 @@ jobs:
             gmail-to-duckdb-*.zip.sha256
 
   release:
-    needs: build
+    needs: [test, build]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Sign build provenance for each archive (Sigstore, through GitHub).
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -110,6 +105,11 @@ jobs:
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/**

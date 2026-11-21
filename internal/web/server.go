@@ -321,9 +321,16 @@ func (s *Server) stat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, res)
 }
 
+// writeJSON encodes v before it writes the status, so an encode error becomes
+// a 500 reply, not a 200 reply with a broken body.
 func writeJSON(w http.ResponseWriter, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		writeErr(w, fmt.Errorf("encode reply: %w", err), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(append(b, '\n'))
 }
 
 func writeErr(w http.ResponseWriter, err error, code int) {

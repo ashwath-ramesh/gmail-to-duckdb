@@ -177,6 +177,7 @@ func SQL(ctx context.Context, db *store.DB, query string, allowWrite bool) (Enve
 	}
 	env.SQL = &SQLPayload{Columns: res.Columns, ColumnTypes: res.ColumnTypes, Rows: res.Rows}
 	env.ResultCount = len(res.Rows)
+	env.Truncated = res.Truncated
 	env.UntrustedContent = true
 	env.UntrustedFields = append([]string{}, res.Columns...)
 	return env, nil
