@@ -87,6 +87,12 @@ func TestCLIAfterServeKilledOrFrozen(t *testing.T) {
 	if err := cmd.Process.Signal(syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
+	// Signal returns before all threads of serve stop, and a running thread
+	// can still answer. Wait until the kernel reports the stop.
+	var ws syscall.WaitStatus
+	if _, err := syscall.Wait4(cmd.Process.Pid, &ws, syscall.WUNTRACED, nil); err != nil || !ws.Stopped() {
+		t.Fatalf("serve did not stop: %v (status %v)", err, ws)
+	}
 	var out bytes.Buffer
 	err := run([]string{"gmail-to-duckdb", "status", "--db", dbPath}, strings.NewReader(""), &out, &out)
 	if err == nil || !strings.Contains(err.Error(), "still holds the database") {
