@@ -179,7 +179,7 @@ In the terminal, type `gmail-to-duckdb search "from:alice invoice"`. The termina
 
 | What you see | What to do |
 |---|---|
-| `invalid_grant` or `oauth refresh token rejected` | Google stopped your sign-in. This occurs after 7 days in Testing, after a password change, or when you remove access. Stop `serve`. Delete only the file `~/.local/share/gmail-to-duckdb/mail.token.json`. Start `serve` again and sign in with the same account. Do not delete the database. |
+| `invalid_grant` or `oauth refresh token rejected` | Google stopped your sign-in. This occurs after 7 days in Testing, after a password change, or when you remove access. Stop `serve`. Type `gmail-to-duckdb logout`. Start `serve` again and sign in with the same account. Do not delete the database. |
 | `Google did not give Gmail read access` | You cleared the Gmail box on the Google page. Start `serve` again. On the Google page, keep the box selected. |
 | `Error 403: access_denied` on the Google page | Your account is not a test user of an External app. Add it on the **Audience** page (Step 2), or use a Personal app. |
 | `Signed out. Open the link that serve printed` | Type `gmail-to-duckdb ui` to get a new link. |
@@ -206,12 +206,12 @@ CAUTION: On a shared computer, an administrator can read your mail copy. Do not 
 
 - Do not share these files, and do not put them in Git or a cloud folder: `credentials.json`, `*.token.json`, `*.serve.json`, `*.duckdb`, and `*.duckdb.search`.
 
-**Remove all local data.** Stop `serve`. Then delete these two folders:
+**Sign out.** Stop `serve`. Then type `gmail-to-duckdb logout`. This removes the access of the tool to your Google account, and deletes the sign-in token on this computer. Your mail copy stays. If `logout` shows an error, open [myaccount.google.com/permissions](https://myaccount.google.com/permissions). Select the app that you made in Step 2, and then click **Remove access**.
+
+**Remove all local data.** Sign out first. Then delete these two folders:
 
 - `~/.config/gmail-to-duckdb/`
 - `~/.local/share/gmail-to-duckdb/`
-
-To also remove its access to your Google account, open [myaccount.google.com/permissions](https://myaccount.google.com/permissions). Select the app that you made in Step 2, and then click **Remove access**.
 
 Full protection details: [docs/security.md](docs/security.md).
 

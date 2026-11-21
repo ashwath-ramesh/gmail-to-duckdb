@@ -28,6 +28,7 @@ On a 4-vCPU Ubuntu VM with a 2 GiB benchmark memory cap, common-term search acro
 | `search QUERY [--json]` | Searches messages. All words count. Returns at most 50 messages. |
 | `get MESSAGE_ID [--body] [--json]` | Shows one message. `--body` adds the stored body. It does not download a body. |
 | `schema [--json]` | Shows the database schema. |
+| `logout` | Revokes the Google grant for this database and deletes its `*.token.json` file. It does not change the mail copy. It refuses while `serve` runs for this database. If Google says that the token was already invalid, it still deletes the file. On a network or Google error, it keeps the file, so you can try again. |
 | `sql [--write] [--read-only] [--format json\|table] [--json] [QUERY]` | Runs one SQL statement. Reads the query from standard input if you give no `QUERY`. Read-only unless you pass `--write`. `--read-only` is an explicit no-op for agents. Returns at most 100,000 rows or about 64 MiB, and stops after 5 minutes. See [SQL restrictions](security.md#sql-restrictions). |
 
 Flags for most commands:
@@ -71,7 +72,7 @@ One Gmail account binds to one database. A different account is an error. Use an
 
 `doctor` checks credentials, the local token file, the database, the search index, ports, and a running `serve` process. Use `doctor --json` for agents. Pass `--port` to match a custom mail page port. If `serve` is running, `doctor` uses that process and does not open DuckDB itself. Before the first sign-in, the token and database checks are `pending`, and `doctor` still passes. The token check only validates local presence, shape, and scope. It cannot prove that Google will refresh the token.
 
-If Google rejects the refresh token, stop `serve`. Remove only the `*.token.json` file for the chosen database. Run `serve` or `sync` and sign in with the same account. Do not remove the database or `credentials.json`.
+If Google rejects the refresh token, stop `serve`. Run `logout` for the chosen database. Run `serve` or `sync` and sign in with the same account. Do not remove the database or `credentials.json`.
 
 ## Message bodies
 

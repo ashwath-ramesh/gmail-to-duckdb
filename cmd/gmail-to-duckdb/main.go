@@ -23,6 +23,7 @@ Commands:
   get MESSAGE_ID [--body]     Show one message (--body: stored text only)
   schema [--json]             Database schema
   sql [--write] [--json]      Run SQL (read-only; --write is database-only)
+  logout                      Revoke Google access and delete the sign-in token
 
 Flags (most commands):
   --db PATH            DuckDB file (default mail.duckdb)
@@ -67,6 +68,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return cmdInit(args[2:], stdout)
 	case "doctor":
 		return cmdDoctor(args[2:], stdout)
+	case "logout":
+		return cmdLogout(args[2:], stdout)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return nil

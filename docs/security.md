@@ -16,13 +16,13 @@ ssh -L 41807:127.0.0.1:41807 USER@REMOTE
 
 Or copy the redirect URL from the laptop and paste it into the remote prompt. The URL must use `127.0.0.1` and the listen port. It must include the same `state`. It must not include a user name or a fragment. You can also paste the `code=` value or the raw code. The exchange is bound to this sign-in by PKCE. If the paste includes `state`, including a percent-encoded `state` key, it must match. A URL on another host is rejected.
 
-`invalid_grant` on refresh means Google rejected the refresh token. Stop `serve`. Remove only the `*.token.json` file for the chosen database. The token basename comes from the database path: `mail.duckdb` uses `mail.token.json`. Run `sync` and sign in with the same account. Do not remove the database or `credentials.json`. The error hint does not include token or HTTP response bytes. Background refresh failures do not open a browser.
+`invalid_grant` on refresh means Google rejected the refresh token. Stop `serve`. Run `logout` for the chosen database: it deletes only that `*.token.json` file. The token basename comes from the database path: `mail.duckdb` uses `mail.token.json`. Run `sync` and sign in with the same account. Do not remove the database or `credentials.json`. The error hint does not include token or HTTP response bytes. Background refresh failures do not open a browser.
 
 `doctor` only checks local token presence, shape, and `gmail.readonly` scope. It cannot prove that Google will refresh the token. It does not call Google.
 
 After the code exchange, the tool reads the scopes that Google granted. If `gmail.readonly` is not in the list, the sign-in fails with a clear message, and no token is saved. The token file keeps the granted scope for `doctor`.
 
-The credentials file names the OAuth endpoints. The tool accepts only a Desktop client (`installed`) with `client_id` and `client_secret`, and only `https` endpoints on `accounts.google.com`, `oauth2.googleapis.com`, or `www.googleapis.com`. It checks this at `init` and at each sign-in. If the file does not name an endpoint, the tool uses the standard Google one.
+The credentials file names the OAuth endpoints. The tool accepts only a Desktop client (`installed`) with `client_id` and `client_secret`, and only `https` endpoints on `accounts.google.com`, `oauth2.googleapis.com`, or `www.googleapis.com`. It checks this at `init` and at each sign-in. If the file does not name an endpoint, the tool uses the standard Google one. `logout` sends the refresh token to `https://oauth2.googleapis.com/revoke` in the POST body, not in the URL, and then deletes the token file.
 
 Each token request has a 30-second limit. Each Gmail API request has a 2-minute limit. A server `Retry-After` value is capped at 5 minutes. HTTP error text keeps the status, the reason, and at most 200 characters of the Google error message. It never keeps the raw reply body. One Gmail reply, or one part of a batch reply, can be at most 128 MiB; a larger one is an error. Batch replies are read part by part, not all at once. The tool talks to Gmail with plain HTTPS REST calls and does not use the Google API client library.
 

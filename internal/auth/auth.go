@@ -188,7 +188,7 @@ func wrapRefreshError(err error) error {
 	if !isInvalidGrant(err) {
 		return err
 	}
-	return fmt.Errorf("%w: stop serve, remove only the token file for this database, then run sync or sign in with the same account; do not delete the database or credentials", errInvalidGrant)
+	return fmt.Errorf("%w: stop serve, run gmail-to-duckdb logout, then start serve and sign in with the same account; do not delete the database or credentials", errInvalidGrant)
 }
 
 func isInvalidGrant(err error) bool {

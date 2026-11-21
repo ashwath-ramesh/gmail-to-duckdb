@@ -82,7 +82,7 @@ func TestPersistSourceWrapsInvalidGrant(t *testing.T) {
 		t.Fatal("must not start login")
 	}
 	msg := err.Error()
-	for _, need := range []string{"stop serve", "token file", "same account", "do not delete the database"} {
+	for _, need := range []string{"stop serve", "gmail-to-duckdb logout", "same account", "do not delete the database"} {
 		if !strings.Contains(strings.ToLower(msg), need) {
 			t.Fatalf("missing %q in %q", need, msg)
 		}
