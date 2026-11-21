@@ -20,9 +20,19 @@ Or copy the redirect URL from the laptop and paste it into the remote prompt. Th
 
 `doctor` only checks local token presence, shape, and `gmail.readonly` scope. It cannot prove that Google will refresh the token. It does not call Google.
 
+After the code exchange, the tool reads the scopes that Google granted. If `gmail.readonly` is not in the list, the sign-in fails with a clear message, and no token is saved. The token file keeps the granted scope for `doctor`.
+
+The credentials file names the OAuth endpoints. The tool accepts only a Desktop client (`installed`) with `client_id` and `client_secret`, and only `https` endpoints on `accounts.google.com`, `oauth2.googleapis.com`, or `www.googleapis.com`. It checks this at `init` and at each sign-in.
+
+Each token request has a 30-second limit. Each Gmail API request has a 2-minute limit. A server `Retry-After` value is capped at 5 minutes. HTTP error text keeps the status, the reason, and at most 200 characters of the Google error message. It never keeps the raw reply body.
+
+## Opening a browser
+
+The tool opens a browser with `open` (macOS), `xdg-open` (Linux), or `rundll32 url.dll,FileProtocolHandler` (Windows). It never runs a shell such as `cmd.exe`. It opens only `https` URLs, loopback `http` URLs, and existing local files.
+
 ## Private files
 
-Secret files (`credentials.json` copy, `*.token.json`, `*.serve.json`, and `config.json`) are written as private files:
+Secret files (`credentials.json` copy, `*.token.json`, `*.serve.json`, `*.open.html`, and `config.json`) are written as private files:
 
 - Unix: files use mode `0600`. New app directories use mode `0700`. Existing parent directories stay unchanged.
 - Windows: the current user and SYSTEM get access. Inherited access from other users is blocked.
@@ -34,9 +44,26 @@ Secret files (`credentials.json` copy, `*.token.json`, `*.serve.json`, and `conf
 
 ## Loopback UI
 
-`serve` and `ui` bind `127.0.0.1` only. The browser Host must be `127.0.0.1` or `localhost` on the listen port. Cross-site and other local-port origins are rejected. The browser gets an HttpOnly session cookie. The CLI sends `X-Token` from `*.serve.json`. The token is not in the printed URL. Do not run them on a shared host if other users can reach your loopback port.
+`serve` and `ui` bind `127.0.0.1` only. Every request must come from a loopback address, with Host `127.0.0.1` or `localhost` on the listen port. That stops DNS rebinding.
 
-The DuckDB UI on port 4213 has no session token. It stays off unless you pass `--duckdb-ui`. Treat that flag as full database access on loopback.
+Every `/api/` request needs the `X-Token` header. The API does not accept cookies: browsers send cookies to every port on `127.0.0.1`, and a web page cannot add a custom header to a cross-site request. `/api/` requests also need a matching `Origin` (if sent) and `Sec-Fetch-Site` of `none` or `same-origin` (if sent). The app shell (`/` and `/static/`) holds no mail data and no secret, so it skips the Origin and Fetch Metadata checks.
+
+The browser gets the token through a one-time login code:
+
+- `serve` makes a random 128-bit code. It works once and expires after 2 minutes.
+- `serve` writes an owner-only launcher file, `*.open.html`, that redirects to `http://127.0.0.1:PORT/#code=CODE`, and opens that file. The code is in the URL fragment, so it does not go to the server in a request line, and it never appears in process arguments that other users can read.
+- The page sends the code to `POST /api/login` and gets the token. It keeps the token in `localStorage`, which is scoped to this origin and port. It removes the code from the address bar.
+- `ui` asks a running serve for a new code (`POST /api/login-code`, which needs `X-Token`).
+
+The CLI sends `X-Token` from `*.serve.json`. Other local users cannot read that file. On a shared host, other users can still reach the loopback port, but without the token they get only the empty app shell.
+
+Every response has a Content-Security-Policy (`default-src 'self'`, no inline script, `img-src 'none'`, `frame-ancestors 'none'`, `form-action 'none'`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`. `/api/` responses also have `Cache-Control: no-store`.
+
+The tool does not start the DuckDB UI. Older versions had a `--duckdb-ui` flag. It opened an SQL server on port 4213 with no token and installed the `ui` extension at runtime, so it was removed. To use DuckDB's own tools, stop `serve` first, then open the database file.
+
+## Email HTML
+
+HTML bodies go through a bluemonday allow-list policy on the server. Remote, protocol-relative, and `data:` image sources are removed. The mail page then shows the HTML in an `<iframe sandbox srcdoc>`. The sandbox allows only pop-ups: no scripts, no forms, no same-origin access, and no top-level navigation. Links open in a new tab. Plain-text bodies and all metadata use `textContent`.
 
 ## SQL restrictions
 
@@ -48,7 +75,7 @@ Dynamic `PIVOT table ON ...` is rejected. DuckDB expands that form into writes a
 
 DuckDB stores raw mail bodies and metadata in the mailbox file. Search acceleration adds a disposable owner-only SQLite sidecar (`*.duckdb.search/index.sqlite`). That sidecar stores tokenized postings plus message ids, internal dates, and search revisions. Those fields can reveal message content. Both files are plaintext. Owner-only mode is not encryption.
 
-The process does not download a DuckDB FTS extension. DuckDB remains the verify authority. A symlink, non-regular, or unowned cache directory or sidecar is a startup error. `--duckdb-ui` disables acceleration for that run and leaves the cache dirty. The next normal `serve` may rebuild it.
+The process does not download a DuckDB FTS extension. DuckDB remains the verify authority. A symlink, non-regular, or unowned cache directory or sidecar is a startup error.
 
 If the index is missing or `fts` is false, literal substring search still works. `fts` is a ready-index compatibility flag. Ranking stays newest-first. Background maintenance rebuilds or applies deltas without blocking the listener. Repair sizes live canonical text. Full and delta builds size cached `search_text` only.
 
@@ -67,3 +94,7 @@ If the index is missing or `fts` is false, literal substring search still works.
 - Windows requires a private inherited parent (current user and SYSTEM only) so DuckDB-created files stay private. The parent must inherit current-user protection to files and subdirectories. An inherit-only ACE for another trustee is refused. A custom unsafe parent is refused. `init` hardens the configured app config and data directories only.
 - Windows also accepts the process token owner (often Administrators when the process is elevated) together with a tight DACL (current user, SYSTEM, and that token owner only). It does not trust an Admin-owned file that allows other trustees.
 - A serve file that exists but is unreadable or unsafe is a hard error. The tool does not fall back to opening the database.
+- A serve file records the absolute database path. `mail.duckdb` and `mail.db` share one serve file name, so the CLI uses a serve only when the paths match. Otherwise it opens its own database and keeps the other serve file.
+- If serve does not answer, the CLI tries to open DuckDB. DuckDB's file lock decides: if the open works, serve has stopped, and the CLI removes the stale serve file. If the database is locked, the CLI stops and names the serve process.
+- `serve` stops cleanly on SIGINT, SIGTERM, and SIGHUP. It removes the serve file and the launcher file.
+- A `config.json` that cannot be read or is not valid JSON is an error. The tool does not fall back to `./mail.duckdb`.
