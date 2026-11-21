@@ -246,7 +246,7 @@ func TestHTTPClientRejectsPrivateTokenError(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	_, err := HTTPClient(ctx, cred, tokPath, freePort(t))
+	_, err := HTTPClient(ctx, cred, tokPath, freePort(t), false)
 	if err == nil {
 		t.Fatal("expected privacy error")
 	}
@@ -267,7 +267,7 @@ func TestHTTPClientReauthsMissingToken(t *testing.T) {
 	port := heldPort(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := HTTPClient(ctx, cred, filepath.Join(dir, "missing.token.json"), port)
+	_, err := HTTPClient(ctx, cred, filepath.Join(dir, "missing.token.json"), port, false)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want canceled login without listen, got %v", err)
 	}
@@ -286,7 +286,7 @@ func TestHTTPClientReauthsExpiredToken(t *testing.T) {
 	port := heldPort(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := HTTPClient(ctx, cred, tokPath, port)
+	_, err := HTTPClient(ctx, cred, tokPath, port, false)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want canceled login without listen, got %v", err)
 	}
@@ -308,7 +308,7 @@ func TestHTTPClientTightensCopiedCredentials(t *testing.T) {
 	if err := saveToken(tokPath, &oauth2.Token{RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := HTTPClient(context.Background(), cred, tokPath, 41807); err != nil {
+	if _, err := HTTPClient(context.Background(), cred, tokPath, 41807, false); err != nil {
 		t.Fatal(err)
 	}
 	assertPrivateFile(t, cred)

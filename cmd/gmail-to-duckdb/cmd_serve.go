@@ -16,24 +16,21 @@ import (
 func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	cf := globalFlags("serve")
 	port := cf.fs.String("port", cf.cfg.Port, "local port")
-	every := cf.fs.String("sync-every", "", "incremental sync interval (e.g. 5m)")
+	every := cf.fs.String("sync-every", "", "incremental sync interval, at least 1m (e.g. 5m)")
+	noBrowser := cf.fs.Bool("no-browser", false, "print the sign-in and mail page links, do not open a browser")
 	if err := cf.parse(args); err != nil {
 		return err
 	}
 	if !asServe {
 		if c, err := web.Dial(*cf.db); err == nil {
-			return openUI(stdout, stderr, *cf.db, func() (string, error) {
+			return openUI(stdout, stderr, *cf.db, !*noBrowser, func() (string, error) {
 				return c.LoginLink(context.Background())
 			})
 		}
 	}
-	var interval time.Duration
-	if *every != "" {
-		d, err := time.ParseDuration(*every)
-		if err != nil {
-			return fmt.Errorf("sync-every: %w", err)
-		}
-		interval = d
+	interval, err := syncInterval(*every)
+	if err != nil {
+		return err
 	}
 	ctx, stop := signalContext()
 	defer stop()
@@ -55,7 +52,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 		stop()
 		s.WaitIdle()
 	}()
-	if api, err := gmailAPI(ctx, *cf.creds, *cf.db, *cf.oauthPort); err == nil {
+	if api, err := gmailAPI(ctx, *cf.creds, *cf.db, *cf.oauthPort, !*noBrowser); err == nil {
 		s.FetchBody = func(ctx context.Context, id string) error {
 			return mailsync.FetchOnDemand(ctx, db, api, id)
 		}
@@ -91,7 +88,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	defer func() { _ = web.RemoveServeFile(*cf.db) }()
 	defer func() { _ = web.RemoveLauncher(*cf.db) }()
 	fmt.Fprintln(stdout, "listening on", listenURL)
-	if err := openUI(stdout, stderr, *cf.db, func() (string, error) {
+	if err := openUI(stdout, stderr, *cf.db, !*noBrowser, func() (string, error) {
 		code, err := s.NewLoginCode()
 		return web.LoginLink(listenURL, code), err
 	}); err != nil {
@@ -127,14 +124,36 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	return <-errc
 }
 
-// openUI prints a one-time login link and opens it in the browser through a
-// private launcher file, so the code does not appear in process arguments.
-func openUI(stdout, stderr io.Writer, dbPath string, link func() (string, error)) error {
+// minSyncEvery keeps a scheduled sync from using the Gmail quota all day.
+const minSyncEvery = time.Minute
+
+// syncInterval parses --sync-every. Empty or zero means no scheduled sync.
+func syncInterval(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("sync-every: %w", err)
+	}
+	if d != 0 && d < minSyncEvery {
+		return 0, fmt.Errorf("sync-every must be at least %s, not %s", minSyncEvery, s)
+	}
+	return d, nil
+}
+
+// openUI prints a one-time login link. With browser, it also opens the link
+// through a private launcher file, so the code does not appear in process
+// arguments.
+func openUI(stdout, stderr io.Writer, dbPath string, browser bool, link func() (string, error)) error {
 	l, err := link()
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(stdout, "open the UI (this link works once, for 2 minutes):", l)
+	if !browser {
+		return nil
+	}
 	path, err := web.WriteLauncher(dbPath, l)
 	if err != nil {
 		return err

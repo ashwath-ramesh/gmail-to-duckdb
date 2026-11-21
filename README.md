@@ -189,13 +189,13 @@ In the terminal, type `gmail-to-duckdb search "from:alice invoice"`. The termina
 | macOS: "cannot be opened because Apple cannot check it" | Type `xattr -d com.apple.quarantine /usr/local/bin/gmail-to-duckdb`. |
 | Windows: "Windows protected your PC" | Type `Unblock-File $HOME\gmail-to-duckdb\gmail-to-duckdb.exe`. |
 
-**Use the tool on a remote computer.** Do this when the tool runs on a remote computer and your browser runs on your laptop. Before you start `serve`, connect with two SSH tunnels:
+**Use the tool on a remote computer.** Do this when the tool runs on a remote computer and your browser runs on your laptop. On your laptop, connect with two SSH tunnels:
 
 ```bash
 ssh -L 41807:127.0.0.1:41807 -L 8080:127.0.0.1:8080 USER@REMOTE
 ```
 
-Then copy the links from the remote terminal into your laptop browser. If the sign-in tab cannot connect, copy the full address from that tab. Paste it into the remote terminal, and push Enter.
+In that SSH session, type `gmail-to-duckdb serve --sync-every 5m --no-browser`. Then copy the links from the remote terminal into your laptop browser. If the sign-in tab cannot connect, copy the full address from that tab. Paste it into the remote terminal, and push Enter.
 
 ## Privacy and safety
 

@@ -20,8 +20,8 @@ On a 4-vCPU Ubuntu VM with a 2 GiB benchmark memory cap, common-term search acro
 | Command | What it does |
 |---|---|
 | `init --credentials PATH [--db PATH]` | Copies your Google client JSON into the config folder (private) and writes `config.json`. It saves an absolute database path. |
-| `serve [--sync-every 5m] [--port N]` | Signs in on first use, runs a metadata sync at start and on each interval, and opens the mail page. |
-| `ui [--port N]` | If serve runs, opens a new one-time login link to its mail page. If serve does not run, starts serve without the start-up sync. |
+| `serve [--sync-every 5m] [--port N] [--no-browser]` | Signs in on first use, runs a metadata sync at start and on each interval, and opens the mail page. `--sync-every` must be at least `1m`. `--no-browser` prints the sign-in and mail page links and does not open them. |
+| `ui [--port N] [--no-browser]` | If serve runs, opens a new one-time login link to its mail page. If serve does not run, starts serve without the start-up sync. `--no-browser` only prints the link. |
 | `doctor [--json] [--port N]` | Checks credentials, token, database, search index, ports, and serve. |
 | `sync [--full] [--bodies]` | Runs one sync. `--full` lists the whole mailbox and marks missing messages as deleted. `--bodies` downloads bodies for messages that do not have one. |
 | `status [--json]` | Shows sync and coverage status. |

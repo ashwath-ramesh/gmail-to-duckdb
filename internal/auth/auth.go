@@ -88,7 +88,9 @@ func googleOAuthHost(h string) bool {
 	return false
 }
 
-func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) (*http.Client, error) {
+// HTTPClient returns a Gmail client. With no saved token, it signs in first;
+// browser tells it to open the Google page (it always prints the link).
+func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int, browser bool) (*http.Client, error) {
 	raw, err := privfile.Read(credPath)
 	if err != nil {
 		return nil, fmt.Errorf("read credentials %s: %w", credPath, err)
@@ -110,7 +112,7 @@ func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) 
 		if !errors.Is(err, errNeedLogin) {
 			return nil, err
 		}
-		tok, err = login(ctx, cfg, oauthPort)
+		tok, err = login(ctx, cfg, oauthPort, browser)
 		if err != nil {
 			return nil, err
 		}
@@ -223,8 +225,12 @@ type loginIO struct {
 	open func(string) error
 }
 
-func login(ctx context.Context, cfg *oauth2.Config, port int) (*oauth2.Token, error) {
-	return doLogin(ctx, cfg, port, loginIO{in: os.Stdin, out: os.Stderr, open: openurl.Open})
+func login(ctx context.Context, cfg *oauth2.Config, port int, browser bool) (*oauth2.Token, error) {
+	seams := loginIO{in: os.Stdin, out: os.Stderr}
+	if browser {
+		seams.open = openurl.Open
+	}
+	return doLogin(ctx, cfg, port, seams)
 }
 
 type loginResult struct {

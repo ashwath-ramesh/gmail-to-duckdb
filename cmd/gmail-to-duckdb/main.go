@@ -29,6 +29,7 @@ Flags (most commands):
   --credentials PATH   OAuth client JSON (default credentials.json)
   --oauth-port N       OAuth callback port (default ` + strconv.Itoa(auth.DefaultOAuthPort) + `)
   --port N             Mail page port (serve, ui, doctor; default 8080)
+  --no-browser         Print links only, do not open a browser (serve, ui)
   --json               Machine-readable envelope
 `
 
