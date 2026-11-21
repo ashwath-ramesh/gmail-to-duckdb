@@ -16,14 +16,11 @@ import (
 const maxDuckConns = 4
 
 func Open(path string) (*DB, error) {
-	return OpenWith(path, Options{})
+	return openWith(path, nil)
 }
 
-func OpenWith(path string, opt Options) (*DB, error) {
-	return openWith(path, opt, nil)
-}
-
-func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
+// openWith runs beforeLock (a test hook) before the SQL configuration lock.
+func openWith(path string, beforeLock func(execer) error) (*DB, error) {
 	path, spill, err := prepareOpen(path)
 	if err != nil {
 		return nil, err
@@ -31,7 +28,6 @@ func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
 	d := &DB{
 		path:    path,
 		spill:   spill,
-		duckUI:  opt.DuckUI,
 		mu:      make(chan struct{}, 1),
 		maintCh: make(chan struct{}, 1),
 		idx:     newSearchCache(path),
@@ -65,13 +61,11 @@ func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
 		_ = d.Close()
 		return nil, fmt.Errorf("schema indexes: %w", err)
 	}
-	var ex execer = sqldb
-	if wrap != nil {
-		ex = wrap(sqldb)
-	}
-	if err := bootstrapTrusted(ex, opt); err != nil {
-		_ = d.Close()
-		return nil, err
+	if beforeLock != nil {
+		if err := beforeLock(sqldb); err != nil {
+			_ = d.Close()
+			return nil, err
+		}
 	}
 	if err := d.lockSQL(); err != nil {
 		_ = d.Close()
@@ -88,12 +82,8 @@ func openWith(path string, opt Options, wrap func(execer) execer) (*DB, error) {
 		_ = d.Close()
 		return nil, fmt.Errorf("maintenance conn: %w", err)
 	}
-	if opt.DuckUI {
-		if err := d.DisableSearchAccel(ctx); err != nil {
-			_ = d.Close()
-			return nil, err
-		}
-	} else if err := d.ClearState(ctx, stateSearchAccel); err != nil {
+	// Remove the marker that the old --duckdb-ui flag left. Its dirty mark already forces a rebuild.
+	if err := d.ClearState(ctx, legacyStateSearchAccel); err != nil {
 		_ = d.Close()
 		return nil, err
 	}
@@ -113,27 +103,6 @@ func execSetDriver(ex driver.ExecerContext, name, value string) error {
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	return nil
-}
-
-func bootstrapTrusted(ex execer, opt Options) error {
-	if opt.DuckUI {
-		if err := loadExtension(ex, "ui"); err != nil {
-			return fmt.Errorf("duckdb ui: %w", err)
-		}
-	}
-	return nil
-}
-
-func loadExtension(ex execer, name string) error {
-	ctx := context.Background()
-	if _, err := ex.ExecContext(ctx, "LOAD "+name); err == nil {
-		return nil
-	}
-	if _, err := ex.ExecContext(ctx, "INSTALL "+name); err != nil {
-		return err
-	}
-	_, err := ex.ExecContext(ctx, "LOAD "+name)
-	return err
 }
 
 func (d *DB) lockSQL() error {

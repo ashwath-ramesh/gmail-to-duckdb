@@ -180,7 +180,7 @@ func TestConnSettingsVerifiedAfterLock(t *testing.T) {
 	}
 }
 
-func TestAccelClearsOnNormalOpen(t *testing.T) {
+func TestLegacyDuckUIMarkerClearsOnOpen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(dbParent(t), "mail.duckdb")
 	db, err := Open(path)
@@ -195,7 +195,11 @@ func TestAccelClearsOnNormalOpen(t *testing.T) {
 	if err := db.RebuildFTS(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.DisableSearchAccel(ctx); err != nil {
+	// Simulate a mailbox that an old --duckdb-ui run left: marker set, index dirty.
+	if err := db.SetState(ctx, legacyStateSearchAccel, "0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := markFTSDirty(ctx, db.sql); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -206,8 +210,8 @@ func TestAccelClearsOnNormalOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = again.Close() })
-	if v, ok, err := again.GetState(ctx, stateSearchAccel); err != nil || (ok && v == searchAccelOff) {
-		t.Fatalf("accel persisted %q %v %v", v, ok, err)
+	if v, ok, err := again.GetState(ctx, legacyStateSearchAccel); err != nil || ok {
+		t.Fatalf("legacy marker persisted %q %v %v", v, ok, err)
 	}
 	if err := again.EnsureFTS(ctx); err != nil {
 		t.Fatal(err)
@@ -287,7 +291,7 @@ func TestIndexedUnicodePunctuationOracle(t *testing.T) {
 	}
 }
 
-func TestIndexStatesPendingRepairDisabled(t *testing.T) {
+func TestIndexStatesPendingRepair(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	msg := sample("m1", time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
@@ -319,13 +323,6 @@ func TestIndexStatesPendingRepairDisabled(t *testing.T) {
 	st, err = db.SearchIndexState(ctx)
 	if err != nil || st != IndexStateRepair {
 		t.Fatalf("repair %s %v", st, err)
-	}
-	if err := db.DisableSearchAccel(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, err = db.SearchIndexState(ctx)
-	if err != nil || st != IndexStateDisabled {
-		t.Fatalf("disabled %s %v", st, err)
 	}
 }
 

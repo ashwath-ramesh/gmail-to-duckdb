@@ -28,7 +28,6 @@ Flags (most commands):
   --credentials PATH   OAuth client JSON (default credentials.json)
   --oauth-port N       OAuth callback port (default ` + itoa(auth.DefaultOAuthPort) + `)
   --json               Machine-readable envelope
-  --duckdb-ui          Allow DuckDB UI on loopback (serve/ui)
 `
 
 func itoa(n int) string {

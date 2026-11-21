@@ -32,7 +32,6 @@ type Envelope struct {
 	UntrustedContent bool         `json:"untrusted_content"`
 	UntrustedFields  []string     `json:"untrusted_fields,omitempty"`
 	FTS              bool         `json:"fts"`
-	DuckDBUI         bool         `json:"duckdb_ui,omitempty"`
 	Phase            string       `json:"phase,omitempty"`
 	Processed        int          `json:"processed,omitempty"`
 	LastError        string       `json:"last_error,omitempty"`

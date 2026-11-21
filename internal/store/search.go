@@ -95,7 +95,7 @@ func (d *DB) indexedSearch(ctx context.Context, f ListFilter, q search.Query) ([
 	if d.testHoldDuck != nil {
 		d.testHoldDuck()
 	}
-	if fresh.accelOff || fresh.repair || fresh.identity != meta.Identity || fresh.epoch != meta.Epoch || meta.Version != searchIndexVer || !meta.Ready || meta.Watermark > fresh.corpus {
+	if fresh.repair || fresh.identity != meta.Identity || fresh.epoch != meta.Epoch || meta.Version != searchIndexVer || !meta.Ready || meta.Watermark > fresh.corpus {
 		return nil, errIndexSkip
 	}
 

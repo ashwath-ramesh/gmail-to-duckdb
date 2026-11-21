@@ -77,9 +77,6 @@ func (d *DB) catchupIndex(ctx context.Context, force bool) error {
 	if err != nil {
 		return err
 	}
-	if fresh.accelOff {
-		return nil
-	}
 	if fresh.repair {
 		if err := d.repairSearchText(ctx); err != nil {
 			return err
@@ -113,9 +110,6 @@ func (d *DB) catchupIndex(ctx context.Context, force bool) error {
 	fresh, err = d.readFreshness(ctx, conn)
 	if err != nil {
 		return err
-	}
-	if fresh.accelOff {
-		return nil
 	}
 	meta, metaErr := d.idx.peek(ctx)
 	d.idx.mu.Lock()

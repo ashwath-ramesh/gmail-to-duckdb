@@ -47,13 +47,6 @@ document.getElementById("sync-now").onclick = async () => {
   loadStatus();
 };
 
-document.getElementById("duck-ui").onclick = async () => {
-  const r = await api("/api/duckdb-ui", { method: "POST" });
-  const j = await r.json();
-  if (j.url) window.open(j.url, "_blank");
-  else alert(j.error || "failed");
-};
-
 function searchBox() {
   return filters.q.value.trim();
 }
@@ -244,7 +237,6 @@ async function loadStatus() {
     el.textContent = parts.join(" · ") || "ready";
     const busy = s.phase && s.phase !== "idle";
     btn.disabled = busy;
-    document.getElementById("duck-ui").hidden = !s.duckdb_ui;
   } catch (err) {
     el.textContent = "status unavailable";
   }

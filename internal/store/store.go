@@ -116,7 +116,6 @@ type DB struct {
 	mu            chan struct{}
 	path          string
 	spill         string
-	duckUI        bool
 	settingsReady atomic.Bool
 	idx           *searchCache
 	indexMu       sync.Mutex
@@ -140,10 +139,6 @@ func (d *DB) acquire(ctx context.Context) error {
 
 func (d *DB) release() {
 	<-d.mu
-}
-
-type Options struct {
-	DuckUI bool
 }
 
 const upsertMessageSQL = `

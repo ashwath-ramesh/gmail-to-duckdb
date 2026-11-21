@@ -172,7 +172,6 @@ func (s *Server) liveStatus(ctx context.Context) (query.Envelope, error) {
 	defer s.rt.mu.Unlock()
 	env := query.Envelope{
 		SchemaVersion: store.SchemaVersion,
-		DuckDBUI:      s.AllowDuckUI,
 		Phase:         s.rt.phase,
 		Processed:     s.rt.processed,
 	}
@@ -186,7 +185,6 @@ func (s *Server) liveStatus(ctx context.Context) (query.Envelope, error) {
 		return env, nil
 	}
 	env = s.rt.env
-	env.DuckDBUI = s.AllowDuckUI
 	env.Phase = s.rt.phase
 	env.Processed = s.rt.processed
 	if env.Phase == "" {

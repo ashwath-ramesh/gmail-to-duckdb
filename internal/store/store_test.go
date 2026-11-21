@@ -903,15 +903,6 @@ func TestQuerySQLConnRecover(t *testing.T) {
 	}
 }
 
-func TestFTSBootstrapOptional(t *testing.T) {
-	if err := bootstrapTrusted(failExec{needle: "fts"}, Options{}); err != nil {
-		t.Fatalf("fts load must not run: %v", err)
-	}
-	if err := bootstrapTrusted(failExec{needle: "ui"}, Options{DuckUI: true}); err == nil {
-		t.Fatal("expected duckdb ui failure")
-	}
-}
-
 func TestSQLUsableWhenIndexUnavailable(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(dbParent(t), "mail.duckdb")
@@ -966,20 +957,6 @@ func TestReconnectAfterLock(t *testing.T) {
 		t.Fatal("external access must stay off")
 	}
 }
-
-type failExec struct{ needle string }
-
-func (f failExec) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	if strings.Contains(strings.ToLower(query), f.needle) {
-		return nil, errors.New(f.needle + " unavailable")
-	}
-	return stubResult{}, nil
-}
-
-type stubResult struct{}
-
-func (stubResult) LastInsertId() (int64, error) { return 0, nil }
-func (stubResult) RowsAffected() (int64, error) { return 0, nil }
 
 func TestQuerySQLConcurrentWithStoreWrite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

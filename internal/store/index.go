@@ -11,21 +11,19 @@ import (
 )
 
 const (
-	stateSearchText       = "search_text_v1"
-	stateFTSDirty         = "fts_dirty"
-	stateCorpusRevision   = "search_corpus_revision"
-	stateSearchEpoch      = "search_norm_epoch"
-	stateSearchCacheID    = "search_cache_id"
-	stateSearchAccel      = "search_accel"
-	ftsDirtyValue         = "1"
-	searchAccelOff        = "0"
-	searchIndexVer        = "trigram-v1"
-	IndexStateReady       = "ready"
-	IndexStatePending     = "pending"
-	IndexStateBuilding    = "building"
-	IndexStateRepair      = "repair"
-	IndexStateDisabled    = "disabled"
-	IndexStateUnavailable = "unavailable"
+	stateSearchText        = "search_text_v1"
+	stateFTSDirty          = "fts_dirty"
+	stateCorpusRevision    = "search_corpus_revision"
+	stateSearchEpoch       = "search_norm_epoch"
+	stateSearchCacheID     = "search_cache_id"
+	legacyStateSearchAccel = "search_accel"
+	ftsDirtyValue          = "1"
+	searchIndexVer         = "trigram-v1"
+	IndexStateReady        = "ready"
+	IndexStatePending      = "pending"
+	IndexStateBuilding     = "building"
+	IndexStateRepair       = "repair"
+	IndexStateUnavailable  = "unavailable"
 )
 
 func (d *DB) migrateSearch(ctx context.Context) error {
@@ -125,13 +123,6 @@ func (d *DB) SearchIndexState(ctx context.Context) (string, error) {
 	if d.building.Load() {
 		return IndexStateBuilding, nil
 	}
-	accel, _, err := d.GetState(ctx, stateSearchAccel)
-	if err != nil {
-		return "", err
-	}
-	if accel == searchAccelOff {
-		return IndexStateDisabled, nil
-	}
 	dirty, ok, err := d.GetState(ctx, stateFTSDirty)
 	if err != nil {
 		return "", err
@@ -196,25 +187,11 @@ func invalidateSearchTx(ctx context.Context, tx *sql.Tx) error {
 	return setStateTx(ctx, tx, stateSearchCacheID, id)
 }
 
-func (d *DB) DisableSearchAccel(ctx context.Context) error {
-	err := d.withTx(ctx, func(tx *sql.Tx) error {
-		if err := setStateTx(ctx, tx, stateSearchAccel, searchAccelOff); err != nil {
-			return err
-		}
-		return invalidateSearchTx(ctx, tx)
-	})
-	if err == nil {
-		d.notifyIndex()
-	}
-	return err
-}
-
 type freshness struct {
 	corpus   int64
 	epoch    string
 	identity string
 	repair   bool
-	accelOff bool
 }
 
 func (d *DB) readFreshness(ctx context.Context, q querier) (freshness, error) {
@@ -240,11 +217,6 @@ func (d *DB) readFreshness(ctx context.Context, q querier) (freshness, error) {
 		return f, err
 	}
 	f.repair = ok && dirty == ftsDirtyValue
-	accel, _, err := queryState(ctx, q, stateSearchAccel)
-	if err != nil {
-		return f, err
-	}
-	f.accelOff = accel == searchAccelOff
 	return f, nil
 }
 

@@ -28,7 +28,6 @@ type Server struct {
 	FetchBody    func(ctx context.Context, id string) error
 	Sync         func(ctx context.Context, opt mailsync.Options) error
 	SyncCtx      context.Context
-	AllowDuckUI  bool
 	AllowedHosts []string
 	rt           runtime
 }
@@ -63,7 +62,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/messages/{id}/body", s.body)
 	mux.HandleFunc("GET /api/stats", s.listStats)
 	mux.HandleFunc("GET /api/stats/{name}", s.stat)
-	mux.HandleFunc("POST /api/duckdb-ui", s.duckUI)
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("GET /api/schema", s.schema)
@@ -345,28 +343,6 @@ func (s *Server) stat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, res)
 }
 
-func (s *Server) duckUI(w http.ResponseWriter, r *http.Request) {
-	if !s.AllowDuckUI {
-		writeErr(w, errNoDuckUI, http.StatusBadRequest)
-		return
-	}
-	if _, err := s.DB.SQL().ExecContext(r.Context(), "CALL start_ui_server()"); err != nil {
-		writeErr(w, err, http.StatusInternalServerError)
-		return
-	}
-	_ = s.DB.DisableSearchAccel(r.Context())
-	s.noteChange()
-	var u string
-	if err := s.DB.SQL().QueryRowContext(r.Context(), "CALL get_ui_url()").Scan(&u); err != nil || u == "" {
-		if err == nil {
-			err = errNoUIURL
-		}
-		writeErr(w, err, http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]string{"url": u})
-}
-
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -379,8 +355,6 @@ func writeErr(w http.ResponseWriter, err error, code int) {
 }
 
 var errNoFetch = errString("credentials not loaded; run sync or pass --credentials")
-var errNoDuckUI = errString("DuckDB UI is disabled; pass --duckdb-ui to serve")
-var errNoUIURL = errString("DuckDB UI URL unavailable")
 
 type errString string
 

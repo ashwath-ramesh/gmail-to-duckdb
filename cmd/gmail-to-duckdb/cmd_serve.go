@@ -22,7 +22,6 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	cfg := config.Load()
 	port := cf.fs.String("port", cfg.Port, "local port")
 	every := cf.fs.String("sync-every", "", "incremental sync interval (e.g. 5m)")
-	duckUI := cf.fs.Bool("duckdb-ui", false, "allow unauthenticated DuckDB UI on loopback")
 	if err := parseFlags(cf.fs, args); err != nil {
 		return err
 	}
@@ -37,7 +36,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	db, err := store.OpenWith(*cf.db, store.Options{DuckUI: *duckUI})
+	db, err := store.Open(*cf.db)
 	if err != nil {
 		return err
 	}
@@ -48,7 +47,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	s := &web.Server{DB: db, Token: tok, SyncCtx: ctx, AllowDuckUI: *duckUI}
+	s := &web.Server{DB: db, Token: tok, SyncCtx: ctx}
 	if hc, err := auth.HTTPClient(ctx, *cf.creds, auth.TokenPath(*cf.db), *cf.oauthPort); err == nil {
 		if api, err := gmail.New(ctx, hc); err == nil {
 			s.FetchBody = func(ctx context.Context, id string) error {
