@@ -104,3 +104,13 @@ If the index is missing or `fts` is false, literal substring search still works.
 - If serve does not answer, the CLI tries to open DuckDB. DuckDB's file lock decides: if the open works, serve has stopped, and the CLI removes the stale serve file. If the database is locked, the CLI stops and names the serve process.
 - `serve` stops cleanly on SIGINT, SIGTERM, and SIGHUP. It removes the serve file and the launcher file.
 - A `config.json` that cannot be read or is not valid JSON is an error. The tool does not fall back to `./mail.duckdb`.
+
+## Release files
+
+Each release archive has a `.sha256` file, and the release also has one `SHA256SUMS` file. A release from v0.3.2 on also has a signed build provenance attestation for each archive. GitHub Actions makes it with Sigstore. It proves that this repository's release workflow built the file from a given commit. To check one, install the [GitHub CLI](https://cli.github.com) and type:
+
+```bash
+gh attestation verify gmail-to-duckdb-linux-amd64.tar.gz --repo ashwath-ramesh/gmail-to-duckdb
+```
+
+The binaries are not code-signed. macOS can show "cannot be opened because Apple cannot check it", and Windows can show "Windows protected your PC". The README tells how to continue. macOS notarization and Windows code signing need paid developer certificates, which this project does not have.

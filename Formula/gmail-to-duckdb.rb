@@ -4,6 +4,11 @@ class GmailToDuckdb < Formula
   version "0.3.1"
 
   on_macos do
+    # From the next release on, also add the Intel build:
+    #   on_intel do
+    #     url ".../gmail-to-duckdb-darwin-amd64.tar.gz"
+    #     sha256 "..."
+    #   end
     on_arm do
       url "https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/download/v0.3.1/gmail-to-duckdb-darwin-arm64.tar.gz"
       sha256 "573a1fbda9d49f3deafca53ca1cee6ce4cd79f2e91da9f534ab86f123ee873fd"

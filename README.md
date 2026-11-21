@@ -16,7 +16,7 @@ Gmail to DuckDB copies your Gmail into one file on your computer. You can then s
 You need:
 
 - A Gmail account (an `@gmail.com` account, or a Google Workspace account that your administrator allows).
-- A computer with one of these systems: macOS on Apple silicon (M1 or later), Linux on x86-64 or ARM64, or Windows on x86-64. Macs with an Intel processor are not supported.
+- A computer with one of these systems: macOS on Apple silicon (M1 or later), Linux on x86-64 or ARM64, or Windows on x86-64. A Mac with an Intel processor needs version 0.3.2 or later, and the download steps below (not Homebrew).
 - A terminal. On macOS, open **Terminal**. On Windows, open **PowerShell**. On Linux, open your terminal program.
 - Approximately 20 minutes.
 
@@ -47,14 +47,18 @@ mv gmail-to-duckdb ~/.local/bin/
 
 The `sha256sum` command must show `OK`. If it does not show `OK`, do not use the file.
 
-**macOS without Homebrew.**
+**macOS without Homebrew.** Type `uname -m`. If the result is `arm64`, use the commands below. If the result is `x86_64` (an Intel Mac), change `arm64` to `amd64` in the commands below.
 
 ```bash
 curl -LO https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/latest/download/gmail-to-duckdb-darwin-arm64.tar.gz
+curl -LO https://github.com/ashwath-ramesh/gmail-to-duckdb/releases/latest/download/gmail-to-duckdb-darwin-arm64.tar.gz.sha256
+shasum -a 256 -c gmail-to-duckdb-darwin-arm64.tar.gz.sha256
 tar -xzf gmail-to-duckdb-darwin-arm64.tar.gz
 sudo mkdir -p /usr/local/bin
 sudo mv gmail-to-duckdb /usr/local/bin/
 ```
+
+The `shasum` command must show `OK`. If it does not show `OK`, do not use the file.
 
 If you downloaded the file with a web browser, macOS can block it. To unblock it, type `xattr -d com.apple.quarantine /usr/local/bin/gmail-to-duckdb`.
 
