@@ -6,13 +6,18 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	"golang.org/x/time/rate"
-	gmailapi "google.golang.org/api/gmail/v1"
-	"google.golang.org/api/option"
 )
+
+const defaultAPIURL = "https://gmail.googleapis.com/gmail/v1/users/me/"
+
+// maxErrorBody limits how much of an error reply is read.
+const maxErrorBody = 64 << 10
 
 type Profile struct {
 	Email     string
@@ -29,27 +34,20 @@ type API interface {
 	Get(ctx context.Context, id, format string) (FetchResult, error)
 }
 
+// Client calls the Gmail REST API with an authorized HTTP client.
 type Client struct {
-	svc      *gmailapi.Service
 	http     *http.Client
 	limiter  *rate.Limiter
+	apiURL   string
 	batchURL string
 	waitHook func(context.Context, int) error
 }
 
-func New(ctx context.Context, hc *http.Client) (*Client, error) {
-	svc, err := gmailapi.NewService(ctx, option.WithHTTPClient(hc))
-	if err != nil {
-		return nil, err
-	}
-	return newClient(svc, hc), nil
-}
-
-func newClient(svc *gmailapi.Service, hc *http.Client) *Client {
+func New(hc *http.Client) *Client {
 	return &Client{
-		svc:      svc,
 		http:     hc,
 		limiter:  rate.NewLimiter(rate.Limit(quotaPerSec), quotaBurst),
+		apiURL:   defaultAPIURL,
 		batchURL: defaultBatchURL,
 	}
 }
@@ -64,81 +62,108 @@ func (c *Client) waitQuota(ctx context.Context, n int) error {
 	return c.limiter.WaitN(ctx, n)
 }
 
-func (c *Client) Profile(ctx context.Context) (Profile, error) {
-	var p *gmailapi.Profile
+// get sends one GET to path under the API URL, with quota wait and retries,
+// and returns the reply body.
+func (c *Client) get(ctx context.Context, path string, q url.Values, quota int) ([]byte, error) {
+	if q == nil {
+		q = url.Values{}
+	}
+	q.Set("prettyPrint", "false")
+	u := c.apiURL + path + "?" + q.Encode()
+	var body []byte
 	err := retry(ctx, func() error {
-		if err := c.waitQuota(ctx, 1); err != nil {
+		if err := c.waitQuota(ctx, quota); err != nil {
 			return err
 		}
-		var e error
-		p, e = c.svc.Users.GetProfile("me").Context(ctx).Do()
-		return e
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Accept", "application/json")
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+			return statusErr(resp.StatusCode, string(b), resp.Header)
+		}
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		body = b
+		return nil
 	})
+	return body, err
+}
+
+func (c *Client) getJSON(ctx context.Context, path string, q url.Values, quota int, out any) error {
+	b, err := c.get(ctx, path, q, quota)
 	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
+}
+
+func (c *Client) Profile(ctx context.Context) (Profile, error) {
+	var r struct {
+		EmailAddress string `json:"emailAddress"`
+		HistoryID    uint64 `json:"historyId,string"`
+	}
+	if err := c.getJSON(ctx, "profile", nil, 1, &r); err != nil {
 		return Profile{}, mapAPIError(err)
 	}
-	return Profile{Email: p.EmailAddress, HistoryID: p.HistoryId}, nil
+	return Profile{Email: r.EmailAddress, HistoryID: r.HistoryID}, nil
 }
 
 func (c *Client) Labels(ctx context.Context) ([]store.Label, error) {
-	var r *gmailapi.ListLabelsResponse
-	err := retry(ctx, func() error {
-		if err := c.waitQuota(ctx, 1); err != nil {
-			return err
-		}
-		var e error
-		r, e = c.svc.Users.Labels.List("me").Context(ctx).Do()
-		return e
-	})
-	if err != nil {
+	var r struct {
+		Labels []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"labels"`
+	}
+	if err := c.getJSON(ctx, "labels", nil, 1, &r); err != nil {
 		return nil, mapAPIError(err)
 	}
 	out := make([]store.Label, 0, len(r.Labels))
 	for _, l := range r.Labels {
-		out = append(out, store.Label{ID: l.Id, Name: l.Name, Type: l.Type})
+		out = append(out, store.Label{ID: l.ID, Name: l.Name, Type: l.Type})
 	}
 	return out, nil
 }
 
 func (c *Client) ListMessages(ctx context.Context, pageToken string) ([]string, string, error) {
-	var r *gmailapi.ListMessagesResponse
-	err := retry(ctx, func() error {
-		if err := c.waitQuota(ctx, quotaPerList); err != nil {
-			return err
-		}
-		call := c.svc.Users.Messages.List("me").MaxResults(500).IncludeSpamTrash(true).Context(ctx)
-		if pageToken != "" {
-			call = call.PageToken(pageToken)
-		}
-		var e error
-		r, e = call.Do()
-		return e
-	})
-	if err != nil {
+	q := url.Values{"maxResults": {"500"}, "includeSpamTrash": {"true"}}
+	if pageToken != "" {
+		q.Set("pageToken", pageToken)
+	}
+	var r struct {
+		Messages []struct {
+			ID string `json:"id"`
+		} `json:"messages"`
+		NextPageToken string `json:"nextPageToken"`
+	}
+	if err := c.getJSON(ctx, "messages", q, quotaPerList, &r); err != nil {
 		return nil, "", mapListError(err)
 	}
 	ids := make([]string, 0, len(r.Messages))
 	for _, m := range r.Messages {
-		ids = append(ids, m.Id)
+		ids = append(ids, m.ID)
 	}
 	return ids, r.NextPageToken, nil
 }
 
 func (c *Client) History(ctx context.Context, startID uint64, pageToken string) (HistoryPage, error) {
-	var r *gmailapi.ListHistoryResponse
-	err := retry(ctx, func() error {
-		if err := c.waitQuota(ctx, quotaPerHist); err != nil {
-			return err
-		}
-		call := c.svc.Users.History.List("me").StartHistoryId(startID).Context(ctx)
-		if pageToken != "" {
-			call = call.PageToken(pageToken)
-		}
-		var e error
-		r, e = call.Do()
-		return e
-	})
-	if err != nil {
+	q := url.Values{"startHistoryId": {strconv.FormatUint(startID, 10)}}
+	if pageToken != "" {
+		q.Set("pageToken", pageToken)
+	}
+	var r historyReply
+	if err := c.getJSON(ctx, "history", q, quotaPerHist, &r); err != nil {
 		if classifyError(err) == classNotFound {
 			return HistoryPage{}, ErrHistoryGone
 		}
@@ -218,16 +243,7 @@ func (c *Client) Get(ctx context.Context, id, format string) (FetchResult, error
 	if format == "" {
 		format = "full"
 	}
-	var msg *gmailapi.Message
-	err := retry(ctx, func() error {
-		if err := c.waitQuota(ctx, quotaPerGet); err != nil {
-			return err
-		}
-		call := c.svc.Users.Messages.Get("me", id).Format(format).Context(ctx)
-		var e error
-		msg, e = call.Do()
-		return e
-	})
+	raw, err := c.get(ctx, "messages/"+url.PathEscape(id), url.Values{"format": {format}}, quotaPerGet)
 	if err != nil {
 		switch classifyError(err) {
 		case classNotFound:
@@ -239,10 +255,6 @@ func (c *Client) Get(ctx context.Context, id, format string) (FetchResult, error
 		default:
 			return FetchResult{ID: id, Status: FetchFatal, Err: err}, err
 		}
-	}
-	raw, err := json.Marshal(msg)
-	if err != nil {
-		return FetchResult{ID: id, Status: FetchFatal, Err: err}, err
 	}
 	if err := MatchMessageID(raw, id); err != nil {
 		return FetchResult{ID: id, Status: FetchFatal, Err: err}, nil

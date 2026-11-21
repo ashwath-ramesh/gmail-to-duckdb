@@ -48,5 +48,5 @@ func gmailAPI(ctx context.Context, creds, dbPath string, oauthPort int, browser 
 	if err != nil {
 		return nil, err
 	}
-	return gmail.New(ctx, hc)
+	return gmail.New(hc), nil
 }

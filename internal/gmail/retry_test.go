@@ -11,32 +11,31 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
-	"google.golang.org/api/googleapi"
 )
 
 func TestClassifyRetryableAndAuth(t *testing.T) {
-	quota := &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "rateLimitExceeded"}}}
+	quota := statusErr(403, `{"error":{"code":403,"message":"Quota exceeded","errors":[{"reason":"rateLimitExceeded"}]}}`, nil)
 	if classifyError(quota) != classRetryable || !isRetryable(quota) {
 		t.Fatalf("quota 403: %v", classifyError(quota))
 	}
-	perm := &googleapi.Error{Code: 403, Message: "forbidden", Errors: []googleapi.ErrorItem{{Reason: "forbidden"}}}
+	perm := statusErr(403, `{"error":{"code":403,"message":"forbidden","errors":[{"reason":"forbidden"}]}}`, nil)
 	if classifyError(perm) != classAuth || isRetryable(perm) {
 		t.Fatalf("perm 403: %v", classifyError(perm))
 	}
-	unauth := &googleapi.Error{Code: 401, Message: "unauthorized"}
+	unauth := statusErr(401, `{"error":{"code":401,"message":"unauthorized"}}`, nil)
 	if classifyError(unauth) != classAuth || isRetryable(unauth) {
 		t.Fatalf("401: %v", classifyError(unauth))
 	}
-	if classifyError(&googleapi.Error{Code: 429}) != classRetryable {
+	if classifyError(statusErr(429, "", nil)) != classRetryable {
 		t.Fatal("429")
 	}
-	if classifyError(&googleapi.Error{Code: 503}) != classRetryable {
+	if classifyError(statusErr(503, "", nil)) != classRetryable {
 		t.Fatal("503")
 	}
-	if classifyError(&googleapi.Error{Code: 404}) != classNotFound {
+	if classifyError(statusErr(404, "", nil)) != classNotFound {
 		t.Fatal("404")
 	}
-	if classifyError(&googleapi.Error{Code: 400, Message: "Invalid page token"}) != classPageToken {
+	if classifyError(statusErr(400, `{"error":{"code":400,"message":"Invalid page token"}}`, nil)) != classPageToken {
 		t.Fatal("page token")
 	}
 	if classifyError(io.EOF) != classRetryable || classifyError(io.ErrUnexpectedEOF) != classRetryable {

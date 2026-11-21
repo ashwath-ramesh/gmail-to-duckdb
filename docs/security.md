@@ -22,7 +22,7 @@ Or copy the redirect URL from the laptop and paste it into the remote prompt. Th
 
 After the code exchange, the tool reads the scopes that Google granted. If `gmail.readonly` is not in the list, the sign-in fails with a clear message, and no token is saved. The token file keeps the granted scope for `doctor`.
 
-The credentials file names the OAuth endpoints. The tool accepts only a Desktop client (`installed`) with `client_id` and `client_secret`, and only `https` endpoints on `accounts.google.com`, `oauth2.googleapis.com`, or `www.googleapis.com`. It checks this at `init` and at each sign-in.
+The credentials file names the OAuth endpoints. The tool accepts only a Desktop client (`installed`) with `client_id` and `client_secret`, and only `https` endpoints on `accounts.google.com`, `oauth2.googleapis.com`, or `www.googleapis.com`. It checks this at `init` and at each sign-in. If the file does not name an endpoint, the tool uses the standard Google one.
 
 Each token request has a 30-second limit. Each Gmail API request has a 2-minute limit. A server `Retry-After` value is capped at 5 minutes. HTTP error text keeps the status, the reason, and at most 200 characters of the Google error message. It never keeps the raw reply body.
 

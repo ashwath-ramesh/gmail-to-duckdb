@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
-	gmailapi "google.golang.org/api/gmail/v1"
-	"google.golang.org/api/option"
 )
 
 func TestListMessagesIncludeSpamTrash(t *testing.T) {
@@ -346,15 +344,85 @@ func writeAPIError(w http.ResponseWriter, code int, reason, message string) {
 
 func testGmailClient(t *testing.T, ts *httptest.Server) *Client {
 	t.Helper()
-	svc, err := gmailapi.NewService(context.Background(),
-		option.WithEndpoint(ts.URL+"/"),
-		option.WithoutAuthentication(),
-		option.WithHTTPClient(ts.Client()),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := newClient(svc, ts.Client())
+	c := New(ts.Client())
+	c.apiURL = ts.URL + "/gmail/v1/users/me/"
 	c.limiter = rate.NewLimiter(rate.Inf, 1000)
 	return c
+}
+
+func TestRESTPathsAndReplies(t *testing.T) {
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.EscapedPath()+"?"+r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/gmail/v1/users/me/profile":
+			_, _ = io.WriteString(w, `{"emailAddress":"me@example.com","messagesTotal":3,"historyId":"18446744073709551615"}`)
+		case "/gmail/v1/users/me/labels":
+			_, _ = io.WriteString(w, `{"labels":[{"id":"INBOX","name":"INBOX","type":"system"},{"id":"Label_1","name":"Receipts","type":"user"}]}`)
+		case "/gmail/v1/users/me/history":
+			_, _ = io.WriteString(w, `{"history":[{"messagesAdded":[{"message":{"id":"a"}}]}],"historyId":"42"}`)
+		case "/gmail/v1/users/me/messages/a/b": // Path is decoded; the check below uses the raw path.
+			_, _ = io.WriteString(w, `{"id":"a/b","threadId":"t","extraField":{"kept":true}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(ts.Close)
+	c := testGmailClient(t, ts)
+	ctx := context.Background()
+
+	p, err := c.Profile(ctx)
+	if err != nil || p.Email != "me@example.com" || p.HistoryID != 18446744073709551615 {
+		t.Fatalf("profile %+v %v", p, err)
+	}
+	labels, err := c.Labels(ctx)
+	if err != nil || len(labels) != 2 || labels[1].ID != "Label_1" || labels[1].Name != "Receipts" || labels[1].Type != "user" {
+		t.Fatalf("labels %+v %v", labels, err)
+	}
+	h, err := c.History(ctx, 7, "tok")
+	if err != nil || h.HistoryID != 42 || len(h.Added) != 1 {
+		t.Fatalf("history %+v %v", h, err)
+	}
+	res, err := c.Get(ctx, "a/b", "full")
+	if err != nil || res.Status != FetchOK || !strings.Contains(string(res.Raw), `"extraField"`) {
+		t.Fatalf("get %+v %v", res, err)
+	}
+	want := []string{
+		"/gmail/v1/users/me/profile?prettyPrint=false",
+		"/gmail/v1/users/me/labels?prettyPrint=false",
+		"/gmail/v1/users/me/history?pageToken=tok&prettyPrint=false&startHistoryId=7",
+		"/gmail/v1/users/me/messages/a%2Fb?format=full&prettyPrint=false",
+	}
+	for i, w := range want {
+		if paths[i] != w {
+			t.Fatalf("request %d = %s, want %s", i, paths[i], w)
+		}
+	}
+}
+
+func TestRESTErrorKeepsRetryAfterAndReason(t *testing.T) {
+	calls := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "1")
+		writeAPIError(w, 403, "userRateLimitExceeded", "slow down")
+	}))
+	t.Cleanup(ts.Close)
+	c := testGmailClient(t, ts)
+	var waits []time.Duration
+	old := retries
+	retries.attempts = 2
+	retries.sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+	t.Cleanup(func() { retries = old })
+	_, err := c.Profile(context.Background())
+	if err == nil || calls != 2 {
+		t.Fatalf("err=%v calls=%d, want a retry then an error", err, calls)
+	}
+	if len(waits) != 1 || waits[0] != time.Second {
+		t.Fatalf("waits %v, want [1s] from Retry-After", waits)
+	}
+	if !strings.Contains(err.Error(), "slow down") {
+		t.Fatalf("err %v", err)
+	}
 }

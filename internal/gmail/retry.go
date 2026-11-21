@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
-	"google.golang.org/api/googleapi"
 )
 
 var (
@@ -130,10 +129,6 @@ func classifyError(err error) errorClass {
 	if errors.As(err, &se) {
 		return classifyStatus(se.Code, se.Reason, se.Body)
 	}
-	var gerr *googleapi.Error
-	if errors.As(err, &gerr) {
-		return classifyStatus(gerr.Code, quotaReason(gerr), gerr.Message+" "+gerr.Body)
-	}
 	if transientNet(err) {
 		return classRetryable
 	}
@@ -164,15 +159,6 @@ func classifyStatus(code int, reason, body string) errorClass {
 		}
 		return classFatal
 	}
-}
-
-func quotaReason(gerr *googleapi.Error) string {
-	for _, e := range gerr.Errors {
-		if quotaHint(e.Reason, e.Message) {
-			return e.Reason
-		}
-	}
-	return ""
 }
 
 func quotaHint(reason, body string) bool {
@@ -224,10 +210,6 @@ func retryAfterOf(err error) time.Duration {
 	var se *statusError
 	if errors.As(err, &se) {
 		return parseRetryAfter(se.Header)
-	}
-	var gerr *googleapi.Error
-	if errors.As(err, &gerr) {
-		return parseRetryAfter(gerr.Header)
 	}
 	return 0
 }

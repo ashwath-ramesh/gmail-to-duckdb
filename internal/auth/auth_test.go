@@ -445,3 +445,23 @@ func TestCheckScope(t *testing.T) {
 		t.Fatalf("scope %q", grantedScope(tok))
 	}
 }
+
+func TestDesktopConfigEndpoints(t *testing.T) {
+	cfg, err := desktopConfig([]byte(`{"installed":{"client_id":"id","client_secret":"sec"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Endpoint.AuthURL != googleAuthURL || cfg.Endpoint.TokenURL != googleTokenURL {
+		t.Fatalf("defaults %+v", cfg.Endpoint)
+	}
+	if cfg.ClientID != "id" || cfg.ClientSecret != "sec" || len(cfg.Scopes) != 1 || cfg.Scopes[0] != GmailReadonlyScope {
+		t.Fatalf("config %+v", cfg)
+	}
+	cfg, err = desktopConfig([]byte(desktopCreds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Endpoint.AuthURL != "https://accounts.google.com/o/oauth2/auth" || cfg.Endpoint.TokenURL != "https://oauth2.googleapis.com/token" {
+		t.Fatalf("from file %+v", cfg.Endpoint)
+	}
+}

@@ -3,8 +3,6 @@ package gmail
 import (
 	"encoding/json"
 	"testing"
-
-	gmailapi "google.golang.org/api/gmail/v1"
 )
 
 func TestParseHistory(t *testing.T) {
@@ -20,11 +18,11 @@ func TestParseHistory(t *testing.T) {
 		"historyId": "77",
 		"nextPageToken": "n1"
 	}`)
-	var r gmailapi.ListHistoryResponse
+	var r historyReply
 	if err := json.Unmarshal(raw, &r); err != nil {
 		t.Fatal(err)
 	}
-	page := historyPage(&r)
+	page := historyPage(r)
 	if page.HistoryID != 77 || page.NextPageToken != "n1" {
 		t.Fatalf("meta: %+v", page)
 	}
