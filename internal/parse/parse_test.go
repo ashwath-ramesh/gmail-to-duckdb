@@ -1,10 +1,13 @@
 package parse
 
 import (
+	"encoding/base64"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestMetadata(t *testing.T) {
@@ -257,5 +260,33 @@ func TestCorruptBodyStillPending(t *testing.T) {
 	}`)
 	if _, err := Message(raw); err == nil {
 		t.Fatal("corrupt plain must stay pending")
+	}
+}
+
+func bodyMessage(contentType string, data []byte) []byte {
+	enc := base64.RawURLEncoding.EncodeToString(data)
+	return []byte(`{"id":"c1","threadId":"t","internalDate":"1700000000000","payload":{"mimeType":"text/plain","headers":[{"name":"Content-Type","value":"` + contentType + `"}],"body":{"size":` + strconv.Itoa(len(data)) + `,"data":"` + enc + `"}}}`)
+}
+
+func TestBodyCharsetDecodesToUTF8(t *testing.T) {
+	for _, c := range []struct {
+		ct   string
+		data []byte
+		want string
+	}{
+		{`text/plain; charset=ISO-8859-1`, []byte("caf\xe9 \xa3"), "café £"},
+		{`text/plain; charset=\"windows-1252\"`, []byte("\x93quoted\x94 \x80"), "“quoted” €"},
+		{`text/plain; charset=shift_jis`, []byte("\x93\xfa\x96\x7b"), "日本"},
+		{`text/plain; charset=utf-8`, []byte("ok \xff end"), "ok � end"},
+		{`text/plain`, []byte("no charset \xfe"), "no charset �"},
+		{`text/plain; charset=x-unknown-charset`, []byte("plain"), "plain"},
+	} {
+		msg, err := Message(bodyMessage(c.ct, c.data))
+		if err != nil {
+			t.Fatalf("%s: %v", c.ct, err)
+		}
+		if msg.Body != c.want || !utf8.ValidString(msg.Body) {
+			t.Fatalf("%s: body %q want %q", c.ct, msg.Body, c.want)
+		}
 	}
 }

@@ -385,3 +385,23 @@ func heldPort(t *testing.T) int {
 	t.Cleanup(func() { _ = ln.Close() })
 	return ln.Addr().(*net.TCPAddr).Port
 }
+
+func TestCheckDesktopClient(t *testing.T) {
+	if err := CheckDesktopClient([]byte(desktopCreds)); err != nil {
+		t.Fatalf("real Desktop client rejected: %v", err)
+	}
+	for _, bad := range []string{
+		`{"web":{"client_id":"x","client_secret":"y"}}`,
+		`{"installed":null}`,
+		`{"installed":{"client_id":"x"}}`,
+		`{"installed":{"client_id":"x","client_secret":"y","token_uri":"https://evil.example/token"}}`,
+		`{"installed":{"client_id":"x","client_secret":"y","token_uri":"http://oauth2.googleapis.com/token"}}`,
+		`{"installed":{"client_id":"x","client_secret":"y","auth_uri":"https://evil.example/&calc"}}`,
+		`{"installed":{"client_id":"x","client_secret":"y","auth_uri":"https://me@accounts.google.com/o/oauth2/auth"}}`,
+		`not json`,
+	} {
+		if err := CheckDesktopClient([]byte(bad)); err == nil {
+			t.Fatalf("accepted %s", bad)
+		}
+	}
+}

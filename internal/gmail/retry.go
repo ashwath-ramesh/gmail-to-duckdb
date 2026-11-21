@@ -2,6 +2,7 @@ package gmail
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -70,7 +71,7 @@ func retry(ctx context.Context, fn func() error) error {
 		if err == nil {
 			return nil
 		}
-		if !isRetryable(err) {
+		if !isRetryable(err) && !requestTimeout(ctx, err) {
 			return err
 		}
 		if attempt == retries.attempts-1 {
@@ -79,6 +80,8 @@ func retry(ctx context.Context, fn func() error) error {
 		wait := retryAfterOf(err)
 		if wait <= 0 {
 			wait = backoff
+		} else if wait > maxRetryAfter {
+			wait = maxRetryAfter
 		}
 		if err := retries.sleep(ctx, wait); err != nil {
 			return err
@@ -89,6 +92,17 @@ func retry(ctx context.Context, fn func() error) error {
 		}
 	}
 	return err
+}
+
+// maxRetryAfter caps a server Retry-After value, so that one bad reply
+// cannot stop sync for hours.
+const maxRetryAfter = 5 * time.Minute
+
+// requestTimeout reports an HTTP client timeout while the caller's context is
+// still alive. Go reports it as context.DeadlineExceeded, but a new attempt can work.
+func requestTimeout(ctx context.Context, err error) bool {
+	var ue *url.Error
+	return ctx.Err() == nil && errors.As(err, &ue) && ue.Timeout()
 }
 
 func isRetryable(err error) bool {
@@ -260,11 +274,35 @@ type statusError struct {
 	Header http.Header
 }
 
+// Error never includes the raw reply body: it can hold request details, and
+// sync stores the error text and shows it in the UI.
 func (e *statusError) Error() string {
+	s := "http " + strconv.Itoa(e.Code)
 	if e.Reason != "" {
-		return "http " + strconv.Itoa(e.Code) + ": " + e.Reason + ": " + e.Body
+		s += ": " + e.Reason
 	}
-	return "http " + strconv.Itoa(e.Code) + ": " + e.Body
+	if msg := googleMessage(e.Body); msg != "" {
+		s += ": " + msg
+	}
+	return s
+}
+
+// googleMessage returns error.message from a Google JSON error reply, cut to
+// 200 characters, or "" if the body is not that shape.
+func googleMessage(body string) string {
+	var reply struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(body), &reply) != nil {
+		return ""
+	}
+	msg := []rune(strings.TrimSpace(reply.Error.Message))
+	if len(msg) > 200 {
+		msg = append(msg[:200], '…')
+	}
+	return string(msg)
 }
 
 func statusErr(code int, body string, header http.Header) error {

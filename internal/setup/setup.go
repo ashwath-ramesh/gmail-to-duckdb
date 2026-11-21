@@ -50,7 +50,7 @@ func Init(credSrc, dbPath string) (config.Config, error) {
 	if err != nil {
 		return config.Config{}, err
 	}
-	if err := checkDesktopCreds(raw); err != nil {
+	if err := auth.CheckDesktopClient(raw); err != nil {
 		return config.Config{}, err
 	}
 	if err := privfile.MkdirPrivate(config.Dir()); err != nil {
@@ -182,17 +182,6 @@ func PrintSteps(w io.Writer) {
 	fmt.Fprint(w, SetupSteps)
 }
 
-func checkDesktopCreds(raw []byte) error {
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("credentials JSON: %w", err)
-	}
-	if _, ok := doc["installed"]; !ok {
-		return fmt.Errorf("credentials must be a Desktop app client (key \"installed\")")
-	}
-	return nil
-}
-
 func checkCredentials(path string) query.Check {
 	c := query.Check{Name: "credentials"}
 	raw, err := os.ReadFile(path)
@@ -200,7 +189,7 @@ func checkCredentials(path string) query.Check {
 		c.Detail = err.Error()
 		return c
 	}
-	if err := checkDesktopCreds(raw); err != nil {
+	if err := auth.CheckDesktopClient(raw); err != nil {
 		c.Detail = err.Error()
 		return c
 	}

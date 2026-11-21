@@ -29,6 +29,13 @@ import (
 // DefaultOAuthPort is a fixed loopback port so a remote SSH tunnel can stay open.
 const DefaultOAuthPort = 41807
 
+// Each HTTP request has a time limit, so that one hung request cannot stop
+// sync forever. Gmail batch replies can be large, so they get more time.
+const (
+	tokenRequestTimeout = 30 * time.Second
+	apiRequestTimeout   = 2 * time.Minute
+)
+
 var errNeedLogin = errors.New("token unusable")
 var errInvalidGrant = errors.New("oauth refresh token rejected")
 
@@ -37,10 +44,56 @@ func TokenPath(dbPath string) string {
 	return strings.TrimSuffix(dbPath, ext) + ".token.json"
 }
 
+// CheckDesktopClient checks that raw is a Google OAuth Desktop client file.
+// The file names the OAuth endpoints, so they must be Google HTTPS hosts:
+// otherwise a changed file could send the sign-in code and the refresh token
+// to another server.
+func CheckDesktopClient(raw []byte) error {
+	var doc struct {
+		Installed *struct {
+			ClientID     string `json:"client_id"`
+			ClientSecret string `json:"client_secret"`
+			AuthURI      string `json:"auth_uri"`
+			TokenURI     string `json:"token_uri"`
+		} `json:"installed"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("credentials JSON: %w", err)
+	}
+	in := doc.Installed
+	if in == nil {
+		return fmt.Errorf("credentials must be a Desktop app client (key \"installed\")")
+	}
+	if in.ClientID == "" || in.ClientSecret == "" {
+		return fmt.Errorf("credentials must have client_id and client_secret")
+	}
+	for name, v := range map[string]string{"auth_uri": in.AuthURI, "token_uri": in.TokenURI} {
+		if v == "" {
+			continue
+		}
+		u, err := url.Parse(v)
+		if err != nil || u.Scheme != "https" || u.User != nil || !googleOAuthHost(u.Host) {
+			return fmt.Errorf("credentials %s must be a Google https URL, got %q", name, v)
+		}
+	}
+	return nil
+}
+
+func googleOAuthHost(h string) bool {
+	switch strings.ToLower(h) {
+	case "accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com":
+		return true
+	}
+	return false
+}
+
 func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) (*http.Client, error) {
 	raw, err := privfile.Read(credPath)
 	if err != nil {
 		return nil, fmt.Errorf("read credentials %s: %w", credPath, err)
+	}
+	if err := CheckDesktopClient(raw); err != nil {
+		return nil, err
 	}
 	cfg, err := google.ConfigFromJSON(raw, gmailapi.GmailReadonlyScope)
 	if err != nil {
@@ -49,6 +102,8 @@ func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) 
 	if oauthPort <= 0 {
 		oauthPort = DefaultOAuthPort
 	}
+	// oauth2 uses this client for the code exchange and for token refresh.
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: tokenRequestTimeout})
 	tok, err := loadToken(tokenPath)
 	if err != nil {
 		if !errors.Is(err, errNeedLogin) {
@@ -63,7 +118,9 @@ func HTTPClient(ctx context.Context, credPath, tokenPath string, oauthPort int) 
 		}
 	}
 	src := &persistSource{src: cfg.TokenSource(ctx, tok), path: tokenPath}
-	return oauth2.NewClient(ctx, src), nil
+	hc := oauth2.NewClient(ctx, src)
+	hc.Timeout = apiRequestTimeout
+	return hc, nil
 }
 
 type persistSource struct {

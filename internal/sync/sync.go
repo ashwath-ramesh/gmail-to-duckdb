@@ -46,6 +46,7 @@ type Runner struct {
 	Log           func(string, ...any)
 	OnProgress    func(Progress)
 	processed     int
+	skipped       int
 	phase         string
 	fullRestarted bool
 }
@@ -71,7 +72,7 @@ func (r *Runner) finish(err error) error {
 	write, cancel := persistContext()
 	defer cancel()
 	if err != nil {
-		if werr := r.DB.SetState(write, store.StateLastSyncError, err.Error()); werr != nil {
+		if werr := r.DB.SetState(write, store.StateLastSyncError, shortError(err)); werr != nil {
 			return errors.Join(err, werr)
 		}
 		return err
@@ -86,12 +87,27 @@ func (r *Runner) finish(err error) error {
 	return nil
 }
 
+// shortError limits the stored and displayed error text. A joined error for
+// a large batch can list hundreds of message ids.
+func shortError(err error) string {
+	msg := []rune(err.Error())
+	if len(msg) > 500 {
+		msg = append(msg[:500], '…')
+	}
+	return string(msg)
+}
+
 func (r *Runner) Sync(ctx context.Context, opt Options) error {
-	return r.finish(r.sync(ctx, opt))
+	err := r.finish(r.sync(ctx, opt))
+	if r.skipped > 0 {
+		r.logf("sync skipped %d messages whose Gmail metadata does not parse", r.skipped)
+	}
+	return err
 }
 
 func (r *Runner) sync(ctx context.Context, opt Options) error {
 	r.processed = 0
+	r.skipped = 0
 	r.fullRestarted = false
 	r.progress("profile")
 	profile, err := r.API.Profile(ctx)
@@ -558,11 +574,14 @@ func (r *Runner) collectFetch(ctx context.Context, ids []string, format string) 
 			}
 			msg, err := parse.Message(res.Raw)
 			if err != nil {
-				r.logf("skip parse: %v", err)
 				if full {
+					r.logf("skip parse: %v", err)
 					unresolved = errors.Join(unresolved, errBodyIncomplete, err)
 				} else {
-					unresolved = errors.Join(unresolved, err)
+					// A metadata reply that does not parse will not parse next time.
+					// Skip it, so that one bad message cannot stop every sync.
+					r.logf("skip message %s: Gmail metadata does not parse: %v", id, err)
+					r.skipped++
 				}
 				continue
 			}

@@ -1,15 +1,19 @@
 package parse
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
 	"net/mail"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
+	"golang.org/x/net/html/charset"
 )
 
 var errEmptyID = fmt.Errorf("empty message id")
@@ -166,11 +170,11 @@ func partText(p *payload) (string, error) {
 		return "", nil
 	}
 	if p.Body.Data != "" {
-		s, err := decodeBody(p.Body.Data)
+		b, err := decodeBody(p.Body.Data)
 		if err != nil {
 			return "", fmt.Errorf("%w: %v", errBodyDecode, err)
 		}
-		return s, nil
+		return toUTF8(b, headerValue(p.Headers, "content-type")), nil
 	}
 	if p.Body.AttachmentID != "" || p.Body.Size > 0 {
 		return "", errMissingText
@@ -207,14 +211,25 @@ func headerValue(hs []store.Header, name string) string {
 	return ""
 }
 
-func decodeBody(data string) (string, error) {
+func decodeBody(data string) ([]byte, error) {
 	data = strings.ReplaceAll(data, "-", "+")
 	data = strings.ReplaceAll(data, "_", "/")
-	b, err := base64.StdEncoding.DecodeString(padB64(data))
-	if err != nil {
-		return "", err
+	return base64.StdEncoding.DecodeString(padB64(data))
+}
+
+// toUTF8 converts a body part from its declared charset (Gmail keeps the
+// original bytes) and replaces any invalid UTF-8 that remains.
+func toUTF8(b []byte, contentType string) string {
+	if _, params, err := mime.ParseMediaType(contentType); err == nil {
+		if label := strings.ToLower(strings.TrimSpace(params["charset"])); label != "" && label != "utf-8" && label != "us-ascii" {
+			if r, err := charset.NewReaderLabel(label, bytes.NewReader(b)); err == nil {
+				if out, err := io.ReadAll(r); err == nil {
+					b = out
+				}
+			}
+		}
 	}
-	return string(b), nil
+	return strings.ToValidUTF8(string(b), "\uFFFD")
 }
 
 func padB64(s string) string {
