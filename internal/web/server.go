@@ -30,6 +30,7 @@ type Server struct {
 	SyncCtx      context.Context
 	AllowedHosts []string
 	rt           runtime
+	login        loginCodes
 }
 
 func AllowedHosts(port int) []string {
@@ -67,30 +68,39 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/schema", s.schema)
 	mux.HandleFunc("POST /api/sql", s.sql)
 	mux.HandleFunc("POST /api/sync", s.syncNow)
+	mux.HandleFunc("POST /api/login", s.loginExchange)
+	mux.HandleFunc("POST /api/login-code", s.loginCode)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		if !loopbackOnly(r) || !s.allowHost(r) || !s.allowOrigin(r) || !s.allowFetchSite(r) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		if !loopbackOnly(r) || !s.allowHost(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") && !s.validToken(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+		// "/" and "/static/" hold only the embedded app. They have no mail data and
+		// no secret, so a navigation from the launcher file (cross-site) can load them.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			h.Set("Cache-Control", "no-store")
+			if !s.allowOrigin(r) || !s.allowFetchSite(r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			if r.URL.Path != "/api/login" && !s.validToken(r) {
+				writeErr(w, errUnauthorized, http.StatusUnauthorized)
+				return
+			}
 		}
 		mux.ServeHTTP(w, r)
 	})
 }
 
+// validToken accepts only the X-Token header. A browser cannot add a custom
+// header to a cross-site request, and cookies would leak to other local ports.
 func (s *Server) validToken(r *http.Request) bool {
-	if s.Token == "" {
-		return false
-	}
-	if tokenEq(r.Header.Get("X-Token"), s.Token) {
-		return true
-	}
-	c, err := r.Cookie("session")
-	return err == nil && tokenEq(c.Value, s.Token)
+	return s.Token != "" && tokenEq(r.Header.Get("X-Token"), s.Token)
 }
 
 func tokenEq(got, want string) bool {
@@ -134,15 +144,6 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if s.Token != "" {
-		http.SetCookie(w, &http.Cookie{
-			Name:     "session",
-			Value:    s.Token,
-			Path:     "/",
-			HttpOnly: true,
-			SameSite: http.SameSiteStrictMode,
-		})
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(b)
@@ -354,6 +355,7 @@ func writeErr(w http.ResponseWriter, err error, code int) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 }
 
+var errUnauthorized = errString("unauthorized: send the X-Token from the serve file, or open a new login link with gmail-to-duckdb ui")
 var errNoFetch = errString("credentials not loaded; run sync or pass --credentials")
 
 type errString string

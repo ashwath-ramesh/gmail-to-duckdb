@@ -73,52 +73,67 @@ func (c *Client) SyncNow(ctx context.Context, opt mailsync.Options) (query.Envel
 	return wait.post(ctx, "/api/sync", map[string]any{"full": opt.Full, "bodies": opt.Bodies, "wait": true})
 }
 
+// LoginLink asks the running serve for a one-time UI login link.
+func (c *Client) LoginLink(ctx context.Context) (string, error) {
+	var out struct {
+		Code string `json:"code"`
+	}
+	if err := c.send(ctx, http.MethodPost, "/api/login-code", nil, struct{}{}, &out); err != nil {
+		return "", err
+	}
+	if out.Code == "" {
+		return "", fmt.Errorf("serve returned no login code")
+	}
+	return LoginLink(c.info.URL, out.Code), nil
+}
+
 func (c *Client) get(ctx context.Context, path string, q url.Values) (query.Envelope, error) {
+	var env query.Envelope
+	err := c.send(ctx, http.MethodGet, path, q, nil, &env)
+	return env, err
+}
+
+func (c *Client) post(ctx context.Context, path string, body any) (query.Envelope, error) {
+	var env query.Envelope
+	err := c.send(ctx, http.MethodPost, path, nil, body, &env)
+	return env, err
+}
+
+func (c *Client) send(ctx context.Context, method, path string, q url.Values, body, out any) error {
 	u, err := url.Parse(c.info.URL)
 	if err != nil {
-		return query.Envelope{}, err
+		return err
 	}
 	u.Path = path
 	if q != nil {
 		u.RawQuery = q.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return query.Envelope{}, err
+	var rd io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		rd = bytes.NewReader(raw)
 	}
-	return c.do(req)
-}
-
-func (c *Client) post(ctx context.Context, path string, body any) (query.Envelope, error) {
-	u, err := url.Parse(c.info.URL)
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), rd)
 	if err != nil {
-		return query.Envelope{}, err
+		return err
 	}
-	u.Path = path
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return query.Envelope{}, err
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(raw))
-	if err != nil {
-		return query.Envelope{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	return c.do(req)
-}
-
-func (c *Client) do(req *http.Request) (query.Envelope, error) {
 	if c.info.Token != "" {
 		req.Header.Set("X-Token", c.info.Token)
 	}
 	res, err := c.http.Do(req)
 	if err != nil {
-		return query.Envelope{}, err
+		return err
 	}
 	defer res.Body.Close()
 	b, err := io.ReadAll(res.Body)
 	if err != nil {
-		return query.Envelope{}, err
+		return err
 	}
 	if res.StatusCode >= 300 {
 		var e struct {
@@ -128,11 +143,7 @@ func (c *Client) do(req *http.Request) (query.Envelope, error) {
 		if e.Error == "" {
 			e.Error = string(b)
 		}
-		return query.Envelope{}, fmt.Errorf("%s", e.Error)
+		return fmt.Errorf("%s", e.Error)
 	}
-	var env query.Envelope
-	if err := json.Unmarshal(b, &env); err != nil {
-		return query.Envelope{}, err
-	}
-	return env, nil
+	return json.Unmarshal(b, out)
 }

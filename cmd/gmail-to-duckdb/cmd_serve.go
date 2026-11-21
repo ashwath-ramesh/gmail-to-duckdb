@@ -25,6 +25,13 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	if err := parseFlags(cf.fs, args); err != nil {
 		return err
 	}
+	if !asServe {
+		if c, err := web.Dial(*cf.db); err == nil {
+			return openUI(stdout, stderr, *cf.db, func() (string, error) {
+				return c.LoginLink(context.Background())
+			})
+		}
+	}
 	var interval time.Duration
 	if *every != "" {
 		d, err := time.ParseDuration(*every)
@@ -83,8 +90,14 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer func() { _ = web.RemoveServeFile(*cf.db) }()
+	defer func() { _ = web.RemoveLauncher(*cf.db) }()
 	fmt.Fprintln(stdout, "listening on", listenURL)
-	_ = openurl.Open(listenURL)
+	if err := openUI(stdout, stderr, *cf.db, func() (string, error) {
+		code, err := s.NewLoginCode()
+		return web.LoginLink(listenURL, code), err
+	}); err != nil {
+		writeDiag(stderr, fmt.Sprintf("open UI: %v", err))
+	}
 	s.StartStatus(ctx)
 	defer s.StopStatus()
 	db.StartMaintenance(ctx)
@@ -113,4 +126,22 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 	}
 
 	return <-errc
+}
+
+// openUI prints a one-time login link and opens it in the browser through a
+// private launcher file, so the code does not appear in process arguments.
+func openUI(stdout, stderr io.Writer, dbPath string, link func() (string, error)) error {
+	l, err := link()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "open the UI (this link works once, for 2 minutes):", l)
+	path, err := web.WriteLauncher(dbPath, l)
+	if err != nil {
+		return err
+	}
+	if err := openurl.Open(path); err != nil {
+		writeDiag(stderr, fmt.Sprintf("could not open a browser: %v", err))
+	}
+	return nil
 }

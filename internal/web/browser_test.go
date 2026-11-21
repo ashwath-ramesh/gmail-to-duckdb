@@ -68,7 +68,11 @@ func TestBrowserSearchHarness(t *testing.T) {
 		t.Fatal("caller")
 	}
 	script := filepath.Join(filepath.Dir(file), "testdata", "browser-harness.js")
-	cmd := exec.Command("node", script, listenURL, chrome, pkg,
+	code, err := s.NewLoginCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("node", script, LoginLink(listenURL, code), chrome, pkg,
 		strconv.Itoa(browserAlpha), strconv.Itoa(browserBeta), strconv.Itoa(unreadBeta))
 	cmd.Env = append(os.Environ(), "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1")
 	var stdout, stderr bytes.Buffer

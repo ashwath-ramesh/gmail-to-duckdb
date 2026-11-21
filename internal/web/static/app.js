@@ -83,9 +83,58 @@ function qs() {
   return p.toString();
 }
 
-function api(path, opts) {
+// The API token lives in localStorage, which is scoped to this origin and port.
+// A one-time code in the URL fragment (#code=...) is exchanged for it once.
+const TOKEN_KEY = "gmail-to-duckdb-token";
+const SIGNED_OUT = "Signed out. Open the link that serve printed, or run: gmail-to-duckdb ui";
+let memToken = "";
+
+function getToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || memToken;
+  } catch {
+    return memToken;
+  }
+}
+
+function setToken(t) {
+  memToken = t;
+  try {
+    if (t) localStorage.setItem(TOKEN_KEY, t);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+}
+
+async function login() {
+  const m = /(?:^#|&)code=([^&]+)/.exec(location.hash);
+  if (!m) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  try {
+    const r = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: decodeURIComponent(m[1]) }),
+      credentials: "omit",
+    });
+    if (r.ok) setToken((await r.json()).token || "");
+  } catch {}
+}
+
+function signedOut() {
+  setToken("");
+  document.getElementById("sync-status").textContent = SIGNED_OUT;
+  listEl.textContent = SIGNED_OUT;
+  moreEl.hidden = true;
+}
+
+async function api(path, opts = {}) {
   const u = new URL(path, location.origin);
-  return fetch(u, { credentials: "same-origin", ...opts });
+  const headers = new Headers(opts.headers || {});
+  const t = getToken();
+  if (t) headers.set("X-Token", t);
+  const r = await fetch(u, { ...opts, headers, credentials: "omit" });
+  if (r.status === 401) signedOut();
+  return r;
 }
 
 async function loadList(gen) {
@@ -97,6 +146,7 @@ async function loadList(gen) {
   let j;
   try {
     const r = await api("/api/messages?" + qs(), { signal });
+    if (r.status === 401) return;
     j = await r.json();
     if (signal.aborted || myGen != reqGen) return;
     if (!r.ok) {
@@ -135,6 +185,7 @@ async function openMsg(id, row) {
   for (const el of listEl.querySelectorAll(".row")) el.classList.remove("active");
   if (row) row.classList.add("active");
   const r = await api("/api/messages/" + encodeURIComponent(id) + "?body=1");
+  if (r.status === 401) return;
   const j = await r.json();
   const m = j.message || j;
   detailEl.innerHTML = "";
@@ -178,6 +229,7 @@ async function openMsg(id, row) {
 async function loadStats() {
   if (currentQuery === "loaded") return;
   const r = await api("/api/stats");
+  if (r.status === 401) return;
   const j = await r.json();
   cardsEl.innerHTML = "";
   for (const s of j.stats || []) {
@@ -219,6 +271,7 @@ async function loadStatus() {
   const btn = document.getElementById("sync-now");
   try {
     const r = await api("/api/status");
+    if (r.status === 401) return;
     const s = await r.json();
     if (!r.ok) {
       el.textContent = s.error || "status failed";
@@ -242,6 +295,12 @@ async function loadStatus() {
   }
 }
 
-loadList(++reqGen);
-loadStatus();
-setInterval(loadStatus, 2000);
+login().finally(() => {
+  if (!getToken()) {
+    signedOut();
+    return;
+  }
+  loadList(++reqGen);
+  loadStatus();
+  setInterval(loadStatus, 2000);
+});

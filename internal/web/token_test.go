@@ -16,7 +16,7 @@ func TestNewToken(t *testing.T) {
 	}
 }
 
-func TestAPITokenHeaderAndCookie(t *testing.T) {
+func TestAPITokenHeaderOnly(t *testing.T) {
 	s, _ := testServer(t)
 	s.Token = "secret"
 	h := s.Handler()
@@ -31,7 +31,7 @@ func TestAPITokenHeaderAndCookie(t *testing.T) {
 		want   int
 	}{
 		{name: "good header", header: "secret", setHdr: true, want: 200},
-		{name: "good cookie", cookie: "secret", setCk: true, want: 200},
+		{name: "good cookie is not auth", cookie: "secret", setCk: true, want: 401},
 		{name: "bad header", header: "secrez", setHdr: true, want: 401},
 		{name: "bad cookie", cookie: "secrez", setCk: true, want: 401},
 		{name: "prefix header", header: "secre", setHdr: true, want: 401},
@@ -39,7 +39,7 @@ func TestAPITokenHeaderAndCookie(t *testing.T) {
 		{name: "longer header", header: "secretX", setHdr: true, want: 401},
 		{name: "length mismatch header", header: "x", setHdr: true, want: 401},
 		{name: "length mismatch cookie", cookie: "toolongtoken", setCk: true, want: 401},
-		{name: "bad header good cookie fallback", header: "wrong", cookie: "secret", setHdr: true, setCk: true, want: 200},
+		{name: "bad header good cookie", header: "wrong", cookie: "secret", setHdr: true, setCk: true, want: 401},
 		{name: "good header bad cookie", header: "secret", cookie: "wrong", setHdr: true, setCk: true, want: 200},
 		{name: "bad header bad cookie", header: "wrong", cookie: "wrong", setHdr: true, setCk: true, want: 401},
 	}
