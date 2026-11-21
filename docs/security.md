@@ -71,6 +71,12 @@ HTML bodies go through a bluemonday allow-list policy on the server. Remote, pro
 
 Dynamic `PIVOT table ON ...` is rejected. DuckDB expands that form into writes and multiple statements. Use `FROM table PIVOT (...)` for a supported read.
 
+Limits stop one query from filling memory or holding the database:
+
+- A result keeps at most 100,000 rows or about 64 MiB of values. After that, the tool stops reading rows and sets `truncated: true`. A write still commits, and only its `RETURNING` output is cut.
+- A query stops after 5 minutes with the error `SQL stopped after 5m0s`. A stopped write does not commit.
+- `NaN` and infinity are returned as the strings `"NaN"`, `"Infinity"`, and `"-Infinity"`, because JSON has no value for them. `DECIMAL` values are exact JSON numbers. `UUID` values are text.
+
 ## Local search index
 
 DuckDB stores raw mail bodies and metadata in the mailbox file. Search acceleration adds a disposable owner-only SQLite sidecar (`*.duckdb.search/index.sqlite`). That sidecar stores tokenized postings plus message ids, internal dates, and search revisions. Those fields can reveal message content. Both files are plaintext. Owner-only mode is not encryption.

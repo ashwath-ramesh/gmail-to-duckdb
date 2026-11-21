@@ -28,7 +28,7 @@ On a 4-vCPU Ubuntu VM with a 2 GiB benchmark memory cap, common-term search acro
 | `search QUERY [--json]` | Searches messages. All words count. Returns at most 50 messages. |
 | `get MESSAGE_ID [--body] [--json]` | Shows one message. `--body` adds the stored body. It does not download a body. |
 | `schema [--json]` | Shows the database schema. |
-| `sql [--write] [--read-only] [--format json\|table] [--json] [QUERY]` | Runs one SQL statement. Reads the query from standard input if you give no `QUERY`. Read-only unless you pass `--write`. `--read-only` is an explicit no-op for agents. |
+| `sql [--write] [--read-only] [--format json\|table] [--json] [QUERY]` | Runs one SQL statement. Reads the query from standard input if you give no `QUERY`. Read-only unless you pass `--write`. `--read-only` is an explicit no-op for agents. Returns at most 100,000 rows or about 64 MiB, and stops after 5 minutes. See [SQL restrictions](security.md#sql-restrictions). |
 
 Flags for most commands:
 

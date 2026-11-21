@@ -616,3 +616,23 @@ func TestBindListenerUsesActualPort(t *testing.T) {
 		t.Fatalf("localhost %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestWriteJSONEncodeErrorIs500(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeJSON(rec, map[string]any{"v": make(chan int)})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("code = %d, want 500", rec.Code)
+	}
+	var reply map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &reply); err != nil || !strings.Contains(reply["error"], "encode reply") {
+		t.Fatalf("body %q (%v), want a JSON error", rec.Body.String(), err)
+	}
+}
+
+func TestSQLNonFiniteFloatOverHTTP(t *testing.T) {
+	s, _ := testServer(t)
+	rec := doReq(t, s.Handler(), http.MethodPost, "/api/sql", "127.0.0.1:8080", nil, strings.NewReader(`{"query":"SELECT 'nan'::DOUBLE AS d"}`))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"NaN"`) {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

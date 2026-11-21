@@ -49,7 +49,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	case "sync":
 		return cmdSync(args[2:], stdout, stderr)
 	case "sql":
-		return cmdSQL(args[2:], stdin, stdout)
+		return cmdSQL(args[2:], stdin, stdout, stderr)
 	case "ui":
 		return cmdServe(args[2:], false, stdout, stderr)
 	case "serve":
