@@ -20,7 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pin the Linux images. The glibc of the build image sets the oldest
+          # glibc that the binary can run on (see MAX_GLIBC below).
+          - os: ubuntu-24.04
             goos: linux
             goarch: amd64
           - os: ubuntu-24.04-arm
@@ -38,11 +40,21 @@ jobs:
             goarch: amd64
             ext: .exe
     runs-on: ${{ matrix.os }}
+    env:
+      # The oldest macOS that the binary runs on. Without it, clang targets the
+      # macOS version of the build image. Go 1.26 needs macOS 12.
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+      # The newest glibc symbol version that the Linux binary may need.
+      # 2.38: Ubuntu 24.04, Debian 13, Fedora 39, and later.
+      MAX_GLIBC: "2.38"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+          # Build release files from a clean cache. The Go cache key does not
+          # include MACOSX_DEPLOYMENT_TARGET.
+          cache: false
       - name: Install MinGW
         if: runner.os == 'Windows'
         # Pin the C compiler that builds the Windows release binary.
@@ -59,6 +71,26 @@ jobs:
       - name: Smoke test
         shell: bash
         run: ./gmail-to-duckdb${{ matrix.ext }} --help
+      - name: Check oldest supported OS
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bin=gmail-to-duckdb
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            need=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+            echo "needs glibc $need (limit $MAX_GLIBC)"
+            if [ "$(printf '%s\n%s\n' "$need" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+              echo "::error::the binary needs glibc $need, newer than $MAX_GLIBC"
+              exit 1
+            fi
+          else
+            need=$(otool -l "$bin" | awk '$1 == "minos" { print $2; exit }')
+            echo "needs macOS $need (target $MACOSX_DEPLOYMENT_TARGET)"
+            if [ "$need" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+              echo "::error::the binary needs macOS $need, not $MACOSX_DEPLOYMENT_TARGET"
+              exit 1
+            fi
+          fi
       - name: Record Go version
         shell: bash
         run: |
