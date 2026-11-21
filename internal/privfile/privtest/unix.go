@@ -1,6 +1,6 @@
 //go:build unix
 
-package auth
+package privtest
 
 import (
 	"os"
@@ -9,7 +9,9 @@ import (
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 )
 
-func assertPrivateFile(t *testing.T, path string) {
+// AssertPrivate fails unless path is a regular file with mode 0600 that the
+// current user owns.
+func AssertPrivate(t *testing.T, path string) {
 	t.Helper()
 	if err := privfile.Check(path); err != nil {
 		t.Fatal(err)
@@ -26,14 +28,17 @@ func assertPrivateFile(t *testing.T, path string) {
 	}
 }
 
-func makePermissive(path string) error {
+// MakePermissive lets other users read path.
+func MakePermissive(path string) error {
 	return os.Chmod(path, 0o644)
 }
 
-func makeDirNotCreatable(dir string) error {
+// MakeDirNotCreatable stops new files in dir.
+func MakeDirNotCreatable(dir string) error {
 	return os.Chmod(dir, 0o555)
 }
 
-func restoreDirCreatable(dir string) error {
+// RestoreDirCreatable undoes MakeDirNotCreatable.
+func RestoreDirCreatable(dir string) error {
 	return os.Chmod(dir, 0o700)
 }

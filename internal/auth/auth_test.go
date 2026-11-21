@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile/privtest"
 	"golang.org/x/oauth2"
 )
 
@@ -29,7 +30,7 @@ func TestWriteTokenMode(t *testing.T) {
 	if err := saveToken(path, &oauth2.Token{AccessToken: "x", RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, path)
+	privtest.AssertPrivate(t, path)
 }
 
 func TestSaveTokenReplacesPermissiveFile(t *testing.T) {
@@ -41,13 +42,13 @@ func TestSaveTokenReplacesPermissiveFile(t *testing.T) {
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := makePermissive(path); err != nil {
+	if err := privtest.MakePermissive(path); err != nil {
 		t.Fatal(err)
 	}
 	if err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, path)
+	privtest.AssertPrivate(t, path)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -162,7 +163,7 @@ func TestSaveTokenRejectsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, path); err != nil {
-		skipIfNoSymlink(t, err)
+		privtest.SkipIfNoSymlink(t, err)
 	}
 	if err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}, ""); err == nil {
 		t.Fatal("expected symlink reject")
@@ -184,7 +185,7 @@ func TestLoadTokenRejectsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, path); err != nil {
-		skipIfNoSymlink(t, err)
+		privtest.SkipIfNoSymlink(t, err)
 	}
 	if _, _, err := loadToken(path); err == nil {
 		t.Fatal("expected symlink reject")
@@ -219,7 +220,7 @@ func TestLoadTokenPrivacyError(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, path); err != nil {
-		skipIfNoSymlink(t, err)
+		privtest.SkipIfNoSymlink(t, err)
 	}
 	_, _, err := loadToken(path)
 	if err == nil {
@@ -242,7 +243,7 @@ func TestHTTPClientRejectsPrivateTokenError(t *testing.T) {
 	}
 	tokPath := filepath.Join(dir, "mail.token.json")
 	if err := os.Symlink(target, tokPath); err != nil {
-		skipIfNoSymlink(t, err)
+		privtest.SkipIfNoSymlink(t, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
@@ -301,7 +302,7 @@ func TestHTTPClientTightensCopiedCredentials(t *testing.T) {
 	if err := os.Chmod(cred, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := makePermissive(cred); err != nil {
+	if err := privtest.MakePermissive(cred); err != nil {
 		t.Fatal(err)
 	}
 	tokPath := filepath.Join(dir, "mail.token.json")
@@ -311,7 +312,7 @@ func TestHTTPClientTightensCopiedCredentials(t *testing.T) {
 	if _, err := HTTPClient(context.Background(), cred, tokPath, 41807, false); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, cred)
+	privtest.AssertPrivate(t, cred)
 }
 
 func TestFailedTokenReplaceLeavesPriorData(t *testing.T) {
@@ -320,15 +321,15 @@ func TestFailedTokenReplaceLeavesPriorData(t *testing.T) {
 	if err := saveToken(path, &oauth2.Token{AccessToken: "old", RefreshToken: "r"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := makeDirNotCreatable(dir); err != nil {
+	if err := privtest.MakeDirNotCreatable(dir); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = restoreDirCreatable(dir) })
+	t.Cleanup(func() { _ = privtest.RestoreDirCreatable(dir) })
 	err := saveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "r"}, "")
 	if err == nil {
 		t.Fatal("expected replace failure")
 	}
-	if err := restoreDirCreatable(dir); err != nil {
+	if err := privtest.RestoreDirCreatable(dir); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(path)
@@ -342,7 +343,7 @@ func TestFailedTokenReplaceLeavesPriorData(t *testing.T) {
 	if tok.AccessToken != "old" {
 		t.Fatalf("prior data lost: %+v", tok)
 	}
-	assertNoTempFiles(t, dir)
+	privtest.AssertNoTempFiles(t, dir)
 }
 
 type stubTokenSource struct {

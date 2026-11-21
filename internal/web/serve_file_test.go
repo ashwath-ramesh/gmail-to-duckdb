@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile/privtest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,7 @@ func TestServeFileRoundTrip(t *testing.T) {
 	if err := WriteServeFile(dbPath, info); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, ServePath(dbPath))
+	privtest.AssertPrivate(t, ServePath(dbPath))
 	got, err := ReadServeFile(dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -50,14 +51,14 @@ func TestWriteServeFileReplacesPermissiveFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"url":"http://127.0.0.1:1","token":"old","pid":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := makePermissive(path); err != nil {
+	if err := privtest.MakePermissive(path); err != nil {
 		t.Fatal(err)
 	}
 	info := ServeInfo{URL: "http://127.0.0.1:8080", Token: "new", PID: 2}
 	if err := WriteServeFile(dbPath, info); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivateFile(t, path)
+	privtest.AssertPrivate(t, path)
 	got, err := ReadServeFile(dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +81,7 @@ func TestWriteServeFileRejectsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, ServePath(dbPath)); err != nil {
-		skipIfNoSymlink(t, err)
+		privtest.SkipIfNoSymlink(t, err)
 	}
 	if err := WriteServeFile(dbPath, ServeInfo{URL: "http://127.0.0.1:8080", Token: "new", PID: 2}); err == nil {
 		t.Fatal("expected symlink reject")
@@ -102,7 +103,7 @@ func TestReadServeFileRejectsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, ServePath(dbPath)); err != nil {
-		skipIfNoSymlink(t, err)
+		privtest.SkipIfNoSymlink(t, err)
 	}
 	if _, err := ReadServeFile(dbPath); err == nil {
 		t.Fatal("expected symlink reject")
@@ -116,15 +117,15 @@ func TestFailedServeReplaceLeavesPriorData(t *testing.T) {
 	if err := WriteServeFile(dbPath, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := makeDirNotCreatable(dir); err != nil {
+	if err := privtest.MakeDirNotCreatable(dir); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = restoreDirCreatable(dir) })
+	t.Cleanup(func() { _ = privtest.RestoreDirCreatable(dir) })
 	writeErr := WriteServeFile(dbPath, ServeInfo{URL: "http://127.0.0.1:9090", Token: "serve-secret-value", PID: 2})
 	if writeErr == nil {
 		t.Fatal("expected replace failure")
 	}
-	if err := restoreDirCreatable(dir); err != nil {
+	if err := privtest.RestoreDirCreatable(dir); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(ServePath(dbPath))
@@ -142,5 +143,5 @@ func TestFailedServeReplaceLeavesPriorData(t *testing.T) {
 	if strings.Contains(writeErr.Error(), "serve-secret-value") {
 		t.Fatalf("error leaked secret: %v", writeErr)
 	}
-	assertNoTempFiles(t, dir)
+	privtest.AssertNoTempFiles(t, dir)
 }
