@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/query"
@@ -26,6 +27,15 @@ func Dial(dbPath string) (*Client, error) {
 	}
 	if err := ValidateServeURL(info.URL); err != nil {
 		return nil, err
+	}
+	if info.DB != "" {
+		want, err := filepath.Abs(dbPath)
+		if err != nil {
+			return nil, err
+		}
+		if filepath.Clean(info.DB) != want {
+			return nil, otherDatabaseError{serveDB: info.DB, want: want}
+		}
 	}
 	c := &Client{info: info, http: &http.Client{Timeout: 30 * time.Second}}
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)

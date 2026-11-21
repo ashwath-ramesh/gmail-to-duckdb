@@ -27,7 +27,13 @@ type runtime struct {
 	wake      chan struct{}
 	stop      context.CancelFunc
 	wg        sync.WaitGroup
+	syncs     sync.WaitGroup
 	started   bool
+}
+
+// WaitIdle waits until no sync runs.
+func (s *Server) WaitIdle() {
+	s.rt.syncs.Wait()
 }
 
 func (s *Server) SetProgress(p mailsync.Progress) {
@@ -137,6 +143,7 @@ func (s *Server) beginSync() error {
 		return errSyncBusy
 	}
 	s.rt.running = true
+	s.rt.syncs.Add(1)
 	s.rt.phase = "starting"
 	s.rt.syncErr = ""
 	return nil
@@ -144,6 +151,7 @@ func (s *Server) beginSync() error {
 
 func (s *Server) endSync(err error) {
 	s.rt.mu.Lock()
+	started := s.rt.running
 	s.rt.running = false
 	s.rt.phase = "idle"
 	if err != nil {
@@ -152,6 +160,9 @@ func (s *Server) endSync(err error) {
 		s.rt.syncErr = ""
 	}
 	s.rt.mu.Unlock()
+	if started {
+		s.rt.syncs.Done()
+	}
 	s.wakeStatus()
 }
 

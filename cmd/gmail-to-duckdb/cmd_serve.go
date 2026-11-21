@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"time"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
@@ -40,7 +39,7 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 		}
 		interval = d
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signalContext()
 	defer stop()
 
 	db, err := store.Open(*cf.db)
@@ -55,6 +54,11 @@ func cmdServe(args []string, asServe bool, stdout, stderr io.Writer) error {
 		return err
 	}
 	s := &web.Server{DB: db, Token: tok, SyncCtx: ctx}
+	// Runs before db.Close: stop the work, then wait for a running sync to end.
+	defer func() {
+		stop()
+		s.WaitIdle()
+	}()
 	if hc, err := auth.HTTPClient(ctx, *cf.creds, auth.TokenPath(*cf.db), *cf.oauthPort); err == nil {
 		if api, err := gmail.New(ctx, hc); err == nil {
 			s.FetchBody = func(ctx context.Context, id string) error {

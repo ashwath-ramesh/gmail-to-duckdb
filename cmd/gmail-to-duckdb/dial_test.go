@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -97,15 +98,36 @@ func TestCLIDialsServe(t *testing.T) {
 	}
 }
 
-func TestCLIRefuseStaleServe(t *testing.T) {
+func TestCLIRecoversStaleServe(t *testing.T) {
 	dbPath := seedDB(t)
 	if err := os.WriteFile(web.ServePath(dbPath), []byte(`{"url":"http://127.0.0.1:1","token":"x","pid":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	err := run([]string{"gmail-to-duckdb", "status", "--db", dbPath, "--json"}, strings.NewReader(""), &out, &out)
-	if err == nil || !strings.Contains(err.Error(), "not reachable") {
-		t.Fatalf("err %v out %s", err, out.String())
+	if err := run([]string{"gmail-to-duckdb", "status", "--db", dbPath, "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("stale serve file must not block: %v %s", err, out.String())
+	}
+	if _, err := os.Stat(web.ServePath(dbPath)); !os.IsNotExist(err) {
+		t.Fatalf("stale serve file kept: %v", err)
+	}
+}
+
+func TestCLIKeepsServeFileOfOtherDatabase(t *testing.T) {
+	dbPath := seedDB(t)
+	other := filepath.Join(filepath.Dir(dbPath), "mail.db")
+	raw, _ := json.Marshal(web.ServeInfo{URL: "http://127.0.0.1:1", Token: "x", PID: 1, DB: other})
+	if err := os.WriteFile(web.ServePath(dbPath), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := web.Dial(dbPath); !web.IsOtherDatabase(err) {
+		t.Fatalf("dial must reject the other database: %v", err)
+	}
+	var out bytes.Buffer
+	if err := run([]string{"gmail-to-duckdb", "status", "--db", dbPath, "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("status %v %s", err, out.String())
+	}
+	if _, err := os.Stat(web.ServePath(dbPath)); err != nil {
+		t.Fatalf("serve file of the other database removed: %v", err)
 	}
 }
 

@@ -1,17 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/gmail"
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/store"
 	mailsync "github.com/ashwath-ramesh/gmail-to-duckdb/internal/sync"
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/web"
 )
 
 func cmdSync(args []string, stdout, stderr io.Writer) error {
@@ -21,24 +16,16 @@ func cmdSync(args []string, stdout, stderr io.Writer) error {
 	if err := parseFlags(cf.fs, args); err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signalContext()
 	defer stop()
 	opt := mailsync.Options{Full: *full, Bodies: *bodies}
 
-	if _, err := web.ReadServeFile(*cf.db); err == nil {
-		c, err := web.Dial(*cf.db)
-		if err != nil {
-			return fmt.Errorf("serve is marked running but not reachable: %w", err)
-		}
-		defer c.Close()
-		_, err = c.SyncNow(ctx, opt)
-		return err
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("serve file present but unreadable: %w", err)
-	}
-
-	db, err := store.Open(*cf.db)
+	c, db, err := connect(*cf.db)
 	if err != nil {
+		return err
+	}
+	if c != nil {
+		_, err = c.SyncNow(ctx, opt)
 		return err
 	}
 	defer db.Close()
