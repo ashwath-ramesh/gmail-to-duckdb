@@ -16,7 +16,7 @@ func decodeBatch(raw []byte, ids []string) ([]FetchResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return decodeBatchParts(body, boundary, ids)
+	return decodeBatchParts(bytes.NewReader(body), boundary, ids)
 }
 
 func batchBody(raw []byte) ([]byte, string, error) {

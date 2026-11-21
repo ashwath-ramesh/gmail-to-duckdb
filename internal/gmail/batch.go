@@ -28,7 +28,14 @@ const (
 	batchGap        = 300 * time.Millisecond
 )
 
+// Reply size limits. Gmail stores messages up to about 50 MB, so one message
+// as JSON is well under maxReplyBytes. A larger reply is an error, so a bad
+// reply cannot fill memory.
+const maxReplyBytes = 128 << 20
+
 var (
+	errReplyTooLarge  = fmt.Errorf("gmail reply is larger than %d MiB", maxReplyBytes>>20)
+	errTooManyParts   = errors.New("gmail batch reply has too many parts")
 	errReplyID        = errors.New("reply id mismatch")
 	errDuplicatePart  = errors.New("duplicate batch response")
 	errUnexpectedPart = errors.New("unexpected batch response")
@@ -59,7 +66,22 @@ func encodeBatchGet(ids []string, format string) ([]byte, string, error) {
 	return buf.Bytes(), "multipart/mixed; boundary=" + w.Boundary(), nil
 }
 
-func decodeBatchBody(body []byte, contentType string, ids []string) ([]FetchResult, error) {
+// readLimited reads r to the end, or fails with errReplyTooLarge.
+func readLimited(r io.Reader) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxReplyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxReplyBytes {
+		return nil, errReplyTooLarge
+	}
+	return b, nil
+}
+
+// decodeBatchBody reads a multipart batch reply as a stream. Each part is at
+// most maxReplyBytes. The reply can have maxBatchSize parts more than the
+// requested ids; the extra parts are reported but their payload is not kept.
+func decodeBatchBody(body io.Reader, contentType string, ids []string) ([]FetchResult, error) {
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return nil, err
@@ -71,11 +93,11 @@ func decodeBatchBody(body []byte, contentType string, ids []string) ([]FetchResu
 	return decodeBatchParts(body, boundary, ids)
 }
 
-func decodeBatchParts(body []byte, boundary string, ids []string) ([]FetchResult, error) {
-	r := multipart.NewReader(bytes.NewReader(body), boundary)
+func decodeBatchParts(body io.Reader, boundary string, ids []string) ([]FetchResult, error) {
+	r := multipart.NewReader(body, boundary)
 	slots := make([]*FetchResult, len(ids))
 	var extra []FetchResult
-	for {
+	for n := 0; ; n++ {
 		part, err := r.NextPart()
 		if err == io.EOF {
 			break
@@ -83,7 +105,11 @@ func decodeBatchParts(body []byte, boundary string, ids []string) ([]FetchResult
 		if err != nil {
 			return nil, err
 		}
-		p, err := io.ReadAll(part)
+		if n >= len(ids)+maxBatchSize {
+			_ = part.Close()
+			return nil, errTooManyParts
+		}
+		p, err := readLimited(part)
 		cid := part.Header.Get("Content-ID")
 		_ = part.Close()
 		if err != nil {
@@ -113,6 +139,7 @@ func decodeBatchParts(body []byte, boundary string, ids []string) ([]FetchResult
 			got.Status = FetchUnexpected
 			got.Err = errUnexpectedPart
 		}
+		got.Raw = nil // nothing reads an unexpected part, so do not keep it
 		extra = append(extra, got)
 	}
 	out := make([]FetchResult, 0, len(ids)+len(extra))

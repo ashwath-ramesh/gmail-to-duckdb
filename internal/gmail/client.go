@@ -89,7 +89,7 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, quota int) 
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 			return statusErr(resp.StatusCode, string(b), resp.Header)
 		}
-		b, err := io.ReadAll(resp.Body)
+		b, err := readLimited(resp.Body)
 		if err != nil {
 			return err
 		}
@@ -213,14 +213,11 @@ func (c *Client) batchGetOnce(ctx context.Context, ids []string, format string) 
 			return err
 		}
 		defer resp.Body.Close()
-		raw, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
 		if resp.StatusCode >= 400 {
-			return statusErr(resp.StatusCode, string(raw), resp.Header)
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+			return statusErr(resp.StatusCode, string(b), resp.Header)
 		}
-		parts, err := decodeBatchBody(raw, resp.Header.Get("Content-Type"), ids)
+		parts, err := decodeBatchBody(resp.Body, resp.Header.Get("Content-Type"), ids)
 		if err != nil {
 			return err
 		}
