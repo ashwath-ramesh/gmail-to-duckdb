@@ -116,13 +116,11 @@ func writeSQLTable(w io.Writer, res *query.SQLPayload) error {
 	return tw.Flush()
 }
 
+// joinTab escapes each cell for the terminal and joins the cells with tabs.
 func joinTab(cols []string) string {
-	out := ""
+	out := make([]string, len(cols))
 	for i, c := range cols {
-		if i > 0 {
-			out += "\t"
-		}
-		out += termtext.SingleLine(c)
+		out[i] = termtext.SingleLine(c)
 	}
-	return out
+	return strings.Join(out, "\t")
 }

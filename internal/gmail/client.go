@@ -144,11 +144,7 @@ func (c *Client) History(ctx context.Context, startID uint64, pageToken string) 
 		}
 		return HistoryPage{}, mapListError(err)
 	}
-	raw, err := r.MarshalJSON()
-	if err != nil {
-		return HistoryPage{}, err
-	}
-	return parseHistory(raw)
+	return historyPage(r), nil
 }
 
 func (c *Client) BatchGet(ctx context.Context, ids []string, format string) ([]FetchResult, error) {

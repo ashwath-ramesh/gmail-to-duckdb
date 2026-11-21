@@ -1,95 +1,67 @@
 package gmail
 
-import (
-	"encoding/json"
-	"strconv"
-)
+import gmailapi "google.golang.org/api/gmail/v1"
 
+// HistoryPage is one page of mailbox changes since a history id.
 type HistoryPage struct {
-	Added         []string
-	Deleted       []string
-	LabelUpdates  []LabelUpdate
+	Added   []string
+	Deleted []string
+	// LabelChanged lists messages whose labels changed. Sync fetches their
+	// metadata again, so the new label list itself is not kept.
+	LabelChanged  []string
 	HistoryID     uint64
 	NextPageToken string
 }
 
-type LabelUpdate struct {
-	ID     string
-	Labels []string
-}
-
-type historyResponse struct {
-	History       []historyRecord `json:"history"`
-	NextPageToken string          `json:"nextPageToken"`
-	HistoryID     string          `json:"historyId"`
-}
-
-type historyRecord struct {
-	MessagesAdded   []historyMsg `json:"messagesAdded"`
-	MessagesDeleted []historyMsg `json:"messagesDeleted"`
-	LabelsAdded     []historyMsg `json:"labelsAdded"`
-	LabelsRemoved   []historyMsg `json:"labelsRemoved"`
-}
-
-type historyMsg struct {
-	Message struct {
-		ID       string   `json:"id"`
-		LabelIDs []string `json:"labelIds"`
-	} `json:"message"`
-}
-
-func parseHistory(raw []byte) (HistoryPage, error) {
-	var r historyResponse
-	if err := json.Unmarshal(raw, &r); err != nil {
-		return HistoryPage{}, err
-	}
-	page := HistoryPage{NextPageToken: r.NextPageToken}
-	if hid, err := strconv.ParseUint(r.HistoryID, 10, 64); err == nil {
-		page.HistoryID = hid
-	}
-	seenAdd := map[string]struct{}{}
-	seenDel := map[string]struct{}{}
-	for _, rec := range r.History {
-		for _, m := range rec.MessagesAdded {
-			id := m.Message.ID
-			if id == "" {
-				continue
-			}
-			if _, ok := seenAdd[id]; ok {
-				continue
-			}
-			seenAdd[id] = struct{}{}
-			page.Added = append(page.Added, id)
+func historyPage(r *gmailapi.ListHistoryResponse) HistoryPage {
+	page := HistoryPage{NextPageToken: r.NextPageToken, HistoryID: r.HistoryId}
+	seenAdd := map[string]bool{}
+	seenDel := map[string]bool{}
+	for _, h := range r.History {
+		if h == nil {
+			continue
 		}
-		for _, m := range rec.MessagesDeleted {
-			id := m.Message.ID
-			if id == "" {
+		for _, m := range h.MessagesAdded {
+			if m == nil {
 				continue
 			}
-			if _, ok := seenDel[id]; ok {
-				continue
+			if id := msgID(m.Message); id != "" && !seenAdd[id] {
+				seenAdd[id] = true
+				page.Added = append(page.Added, id)
 			}
-			seenDel[id] = struct{}{}
-			page.Deleted = append(page.Deleted, id)
 		}
-		for _, m := range rec.LabelsAdded {
-			if m.Message.ID == "" {
+		for _, m := range h.MessagesDeleted {
+			if m == nil {
 				continue
 			}
-			page.LabelUpdates = append(page.LabelUpdates, LabelUpdate{
-				ID:     m.Message.ID,
-				Labels: m.Message.LabelIDs,
-			})
+			if id := msgID(m.Message); id != "" && !seenDel[id] {
+				seenDel[id] = true
+				page.Deleted = append(page.Deleted, id)
+			}
 		}
-		for _, m := range rec.LabelsRemoved {
-			if m.Message.ID == "" {
+		for _, m := range h.LabelsAdded {
+			if m == nil {
 				continue
 			}
-			page.LabelUpdates = append(page.LabelUpdates, LabelUpdate{
-				ID:     m.Message.ID,
-				Labels: m.Message.LabelIDs,
-			})
+			if id := msgID(m.Message); id != "" {
+				page.LabelChanged = append(page.LabelChanged, id)
+			}
+		}
+		for _, m := range h.LabelsRemoved {
+			if m == nil {
+				continue
+			}
+			if id := msgID(m.Message); id != "" {
+				page.LabelChanged = append(page.LabelChanged, id)
+			}
 		}
 	}
-	return page, nil
+	return page
+}
+
+func msgID(m *gmailapi.Message) string {
+	if m == nil {
+		return ""
+	}
+	return m.Id
 }

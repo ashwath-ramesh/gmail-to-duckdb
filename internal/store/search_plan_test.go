@@ -54,7 +54,7 @@ func TestSearchSparseCandidatesVerifyPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := ListFilter{Query: `"invoice leftover"`, Limit: len(cands)}
-	page, err := db.queryList(ctx, nil, f, parsed, parsed.Terms, true, len(cands), 0, false, time.Time{}, "", cands...)
+	page, err := db.queryList(ctx, nil, f, parsed, parsed.Terms, true, len(cands), 0, cands...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestSearchVerifyPlan70k(t *testing.T) {
 	var times []time.Duration
 	for i := 0; i < 5; i++ {
 		t0 := time.Now()
-		page, err := db.queryList(ctx, nil, f, parsed, parsed.Terms, true, len(ids), 0, false, time.Time{}, "", ids...)
+		page, err := db.queryList(ctx, nil, f, parsed, parsed.Terms, true, len(ids), 0, ids...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -151,7 +151,7 @@ func newestFirst(ids []string) []string {
 
 func explainList(t *testing.T, db *DB, f ListFilter, q search.Query, terms []string, useCached bool, limit int, ids ...string) string {
 	t.Helper()
-	query, args := buildListQuery(f, q, terms, useCached, limit, 0, false, time.Time{}, "", ids...)
+	query, args := buildListQuery(f, q, terms, useCached, limit, 0, ids...)
 	rows, err := db.sql.Query("EXPLAIN ANALYZE "+query, args...)
 	if err != nil {
 		t.Fatal(err)

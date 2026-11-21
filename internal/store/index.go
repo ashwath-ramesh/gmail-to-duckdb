@@ -53,21 +53,21 @@ func (d *DB) migrateSearch(ctx context.Context) error {
 }
 
 func initSearchMetaTx(ctx context.Context, tx *sql.Tx) error {
-	if _, ok, err := getStateTx(ctx, tx, stateCorpusRevision); err != nil {
+	if _, ok, err := queryState(ctx, tx, stateCorpusRevision); err != nil {
 		return err
 	} else if !ok {
 		if err := setStateTx(ctx, tx, stateCorpusRevision, "0"); err != nil {
 			return err
 		}
 	}
-	if _, ok, err := getStateTx(ctx, tx, stateSearchEpoch); err != nil {
+	if _, ok, err := queryState(ctx, tx, stateSearchEpoch); err != nil {
 		return err
 	} else if !ok {
 		if err := setStateTx(ctx, tx, stateSearchEpoch, "1"); err != nil {
 			return err
 		}
 	}
-	if _, ok, err := getStateTx(ctx, tx, stateSearchCacheID); err != nil {
+	if _, ok, err := queryState(ctx, tx, stateSearchCacheID); err != nil {
 		return err
 	} else if !ok {
 		id, err := newCacheID()
@@ -96,22 +96,8 @@ func (d *DB) RebuildFTS(ctx context.Context) error {
 	return d.catchupIndex(ctx, true)
 }
 
-func (d *DB) EnsureFTS(ctx context.Context) error {
-	ok, err := d.hasFTS(ctx)
-	if err != nil || ok {
-		return err
-	}
-	if err := d.repairSearchText(ctx); err != nil {
-		return err
-	}
-	return d.catchupIndex(ctx, false)
-}
-
+// HasFTS reports whether the search index is ready.
 func (d *DB) HasFTS(ctx context.Context) (bool, error) {
-	return d.hasFTS(ctx)
-}
-
-func (d *DB) hasFTS(ctx context.Context) (bool, error) {
 	st, err := d.SearchIndexState(ctx)
 	if err != nil {
 		return false, err
@@ -171,7 +157,7 @@ func invalidateSearchTx(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	epoch := int64(1)
-	if v, ok, err := getStateTx(ctx, tx, stateSearchEpoch); err != nil {
+	if v, ok, err := queryState(ctx, tx, stateSearchEpoch); err != nil {
 		return err
 	} else if ok {
 		epoch, _ = strconv.ParseInt(v, 10, 64)
@@ -329,7 +315,7 @@ func (d *DB) repairSearchText(ctx context.Context) error {
 				return err
 			}
 			err := d.withTx(ctx, func(tx *sql.Tx) error {
-				cur, _, err := getStateTx(ctx, tx, stateSearchEpoch)
+				cur, _, err := queryState(ctx, tx, stateSearchEpoch)
 				if err != nil {
 					return err
 				}
@@ -346,7 +332,7 @@ func (d *DB) repairSearchText(ctx context.Context) error {
 					return err
 				}
 				if len(ids) == 0 {
-					again, _, err := getStateTx(ctx, tx, stateSearchEpoch)
+					again, _, err := queryState(ctx, tx, stateSearchEpoch)
 					if err != nil {
 						return err
 					}

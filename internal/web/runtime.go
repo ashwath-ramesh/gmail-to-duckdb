@@ -17,7 +17,8 @@ var (
 	errNoSync   = errors.New("sync is off")
 )
 
-type runtime struct {
+// serverState is the mutable state of a running Server.
+type serverState struct {
 	mu        sync.Mutex
 	running   bool
 	phase     string
@@ -42,22 +43,6 @@ func (s *Server) SetProgress(p mailsync.Progress) {
 	defer s.rt.mu.Unlock()
 	s.rt.phase = p.Phase
 	s.rt.processed = p.Processed
-}
-
-func (s *Server) SeedStatus(ctx context.Context) {
-	if ctx == nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-	}
-	env, err := query.Status(ctx, s.DB)
-	if err != nil {
-		return
-	}
-	s.rt.mu.Lock()
-	s.rt.env = env
-	s.rt.hasCache = true
-	s.rt.mu.Unlock()
 }
 
 func (s *Server) StartStatus(ctx context.Context) {
@@ -128,10 +113,6 @@ func (s *Server) wakeStatus() {
 	}
 }
 
-func (s *Server) noteChange() {
-	s.wakeStatus()
-}
-
 func (s *Server) refreshStatus(ctx context.Context) {
 	if err := ctx.Err(); err != nil {
 		return
@@ -179,10 +160,6 @@ func (s *Server) endSync(err error) {
 	s.wakeStatus()
 }
 
-func (s *Server) doSync(ctx context.Context, opt mailsync.Options) error {
-	return s.Sync(ctx, opt)
-}
-
 func (s *Server) syncContext() context.Context {
 	if s.SyncCtx != nil {
 		return s.SyncCtx
@@ -190,8 +167,8 @@ func (s *Server) syncContext() context.Context {
 	return context.Background()
 }
 
-func (s *Server) liveStatus(ctx context.Context) (query.Envelope, error) {
-	_ = ctx
+// liveStatus is the cached status with the live sync phase and error on top.
+func (s *Server) liveStatus() query.Envelope {
 	s.rt.mu.Lock()
 	defer s.rt.mu.Unlock()
 	env := query.Envelope{
@@ -208,7 +185,7 @@ func (s *Server) liveStatus(ctx context.Context) (query.Envelope, error) {
 		} else if s.NoSyncReason != "" {
 			env.LastError = s.NoSyncReason
 		}
-		return env, nil
+		return env
 	}
 	env = s.rt.env
 	env.Phase = s.rt.phase
@@ -225,7 +202,7 @@ func (s *Server) liveStatus(ctx context.Context) (query.Envelope, error) {
 	} else if s.NoSyncReason != "" {
 		env.LastError = s.NoSyncReason
 	}
-	return env, nil
+	return env
 }
 
 func (s *Server) StartSync(ctx context.Context, opt mailsync.Options) error {
@@ -233,7 +210,7 @@ func (s *Server) StartSync(ctx context.Context, opt mailsync.Options) error {
 		return err
 	}
 	go func() {
-		err := s.doSync(ctx, opt)
+		err := s.Sync(ctx, opt)
 		s.endSync(err)
 	}()
 	return nil
@@ -243,7 +220,7 @@ func (s *Server) WaitSync(ctx context.Context, opt mailsync.Options) error {
 	if err := s.beginSync(); err != nil {
 		return err
 	}
-	err := s.doSync(ctx, opt)
+	err := s.Sync(ctx, opt)
 	s.endSync(err)
 	return err
 }

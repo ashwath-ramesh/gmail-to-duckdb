@@ -51,8 +51,6 @@ func (c *Client) Health(ctx context.Context) error {
 	return err
 }
 
-func (c *Client) Close() error { return nil }
-
 func (c *Client) Status(ctx context.Context) (query.Envelope, error) {
 	return c.get(ctx, "/api/status", nil)
 }

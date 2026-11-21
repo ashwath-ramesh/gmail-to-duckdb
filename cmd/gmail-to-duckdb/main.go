@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/auth"
 	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
@@ -26,13 +27,9 @@ Commands:
 Flags (most commands):
   --db PATH            DuckDB file (default mail.duckdb)
   --credentials PATH   OAuth client JSON (default credentials.json)
-  --oauth-port N       OAuth callback port (default ` + itoa(auth.DefaultOAuthPort) + `)
+  --oauth-port N       OAuth callback port (default ` + strconv.Itoa(auth.DefaultOAuthPort) + `)
   --json               Machine-readable envelope
 `
-
-func itoa(n int) string {
-	return fmt.Sprintf("%d", n)
-}
 
 func main() {
 	privfile.LockDownProcess()

@@ -105,7 +105,7 @@ func TestSearchBenchmark70k(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q current: %v", qs, err)
 		}
-		base, err := db.queryList(ctx, nil, f, parsed, parsed.Terms, false, 50, 0, false, time.Time{}, "")
+		base, err := db.queryList(ctx, nil, f, parsed, parsed.Terms, false, 50, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -125,7 +125,7 @@ func TestSearchBenchmark70k(t *testing.T) {
 			}
 			curD = append(curD, time.Since(t0))
 			t1 := time.Now()
-			_, err = db.queryList(ctx, nil, f, parsed, parsed.Terms, false, 50, 0, false, time.Time{}, "")
+			_, err = db.queryList(ctx, nil, f, parsed, parsed.Terms, false, 50, 0)
 			if err != nil {
 				t.Fatal(err)
 			}

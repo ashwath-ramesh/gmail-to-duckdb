@@ -39,16 +39,3 @@ type FetchResult struct {
 	Raw    []byte
 	Err    error
 }
-
-func (r FetchResult) OK() bool { return r.Status == FetchOK }
-
-func (r FetchResult) Deleted() bool { return r.Status == FetchNotFound }
-
-func (r FetchResult) Unresolved() bool {
-	switch r.Status {
-	case FetchOK, FetchNotFound:
-		return false
-	default:
-		return true
-	}
-}

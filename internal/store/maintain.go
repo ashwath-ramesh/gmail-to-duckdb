@@ -8,13 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/ashwath-ramesh/gmail-to-duckdb/internal/privfile"
 )
 
 const (
-	indexBatchMsgs    = 256
-	indexBatchBytes   = 8 << 20
+	indexBatchMsgs  = 256
+	indexBatchBytes = 8 << 20
 	// Every write calls notifyIndex. The tick only retries after an error.
 	indexCatchupEvery = 15 * time.Second
 )
@@ -353,18 +351,9 @@ FROM messages WHERE id IN `)
 }
 
 func prepareSearchDir(dir string) error {
-	fi, err := os.Lstat(dir)
-	if os.IsNotExist(err) {
-		return privfile.MkdirPrivate(dir)
-	}
-	if err != nil {
+	existed, err := ensureDir(dir, "search directory")
+	if err != nil || !existed {
 		return err
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("search directory is a symlink")
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("search path is not a directory")
 	}
 	return inspectCacheDir(dir, false)
 }

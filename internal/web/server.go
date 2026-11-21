@@ -31,7 +31,7 @@ type Server struct {
 	NoSyncReason string
 	SyncCtx      context.Context
 	AllowedHosts []string
-	rt           runtime
+	rt           serverState
 	login        loginCodes
 }
 
@@ -129,14 +129,6 @@ func Serve(ctx context.Context, ln net.Listener, h http.Handler) error {
 	return err
 }
 
-func ListenAndServe(ctx context.Context, port string, h http.Handler) error {
-	ln, err := Listen(port)
-	if err != nil {
-		return err
-	}
-	return Serve(ctx, ln, h)
-}
-
 func Addr(port string) string {
 	return "http://127.0.0.1:" + port
 }
@@ -155,8 +147,6 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := store.ListFilter{
 		Unread: q.Get("unread") == "1",
-		Label:  q.Get("label"),
-		From:   q.Get("from"),
 		Query:  q.Get("q"),
 		Limit:  50,
 	}
@@ -169,10 +159,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if v := q.Get("offset"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			if n > 5000 {
-				n = 5000
-			}
-			f.Offset = n
+			f.Offset = n // ListMessages caps it.
 		}
 	}
 	msgs, err := s.DB.ListMessages(r.Context(), f)
@@ -184,11 +171,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, code)
 		return
 	}
-	env, err := s.liveStatus(r.Context())
-	if err != nil {
-		writeErr(w, err, http.StatusInternalServerError)
-		return
-	}
+	env := s.liveStatus()
 	out := make([]query.Message, 0, len(msgs))
 	for _, m := range msgs {
 		out = append(out, query.MessageFromStore(m, false))
@@ -218,11 +201,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	env, err := s.liveStatus(r.Context())
-	if err != nil {
-		writeErr(w, err, http.StatusInternalServerError)
-		return
-	}
+	env := s.liveStatus()
 	writeJSON(w, env)
 }
 
@@ -250,7 +229,7 @@ func (s *Server) sql(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Write {
-		s.noteChange()
+		s.wakeStatus()
 	}
 	writeJSON(w, env)
 }
@@ -289,11 +268,7 @@ func (s *Server) syncNow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	env, err := s.liveStatus(r.Context())
-	if err != nil {
-		writeErr(w, err, http.StatusInternalServerError)
-		return
-	}
+	env := s.liveStatus()
 	writeJSON(w, env)
 }
 
@@ -315,7 +290,7 @@ func (s *Server) body(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, code)
 		return
 	}
-	s.noteChange()
+	s.wakeStatus()
 	writeJSON(w, map[string]any{"ok": true})
 }
 

@@ -147,21 +147,6 @@ func TestListKeysetAndFilters(t *testing.T) {
 		t.Fatalf("unread: %#v", ids(unread))
 	}
 
-	from, err := db.ListMessages(ctx, ListFilter{Limit: 10, From: "other@example.com"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(from) != 1 || from[0].ID != "b" {
-		t.Fatalf("from: %#v", ids(from))
-	}
-
-	labeled, err := db.ListMessages(ctx, ListFilter{Limit: 10, Label: "UNREAD"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(labeled) != 1 || labeled[0].ID != "a" {
-		t.Fatalf("label: %#v", ids(labeled))
-	}
 }
 
 func TestMarkDeletedAndSeen(t *testing.T) {
@@ -398,14 +383,14 @@ func TestSearchFTSRankAndFallback(t *testing.T) {
 func TestEnsureFTS(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
-	ok, err := db.hasFTS(ctx)
+	ok, err := db.HasFTS(ctx)
 	if err != nil || ok {
 		t.Fatalf("fts before %v %v", ok, err)
 	}
 	if err := db.EnsureFTS(ctx); err != nil {
 		t.Fatal(err)
 	}
-	ok, err = db.hasFTS(ctx)
+	ok, err = db.HasFTS(ctx)
 	if err != nil || !ok {
 		t.Fatalf("fts after %v %v", ok, err)
 	}
@@ -415,7 +400,7 @@ func TestEnsureFTS(t *testing.T) {
 	if err := db.EnsureFTS(ctx); err != nil {
 		t.Fatal(err)
 	}
-	ok, err = db.hasFTS(ctx)
+	ok, err = db.HasFTS(ctx)
 	if err != nil || !ok {
 		t.Fatalf("ensure after identity change %v %v", ok, err)
 	}

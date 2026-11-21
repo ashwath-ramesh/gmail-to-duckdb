@@ -13,16 +13,16 @@ import (
 )
 
 const (
-	stateHistoryID    = "history_id"
-	stateListPage     = "list_page_token"
-	stateHistoryPage  = "history_page_token"
-	stateHistoryStart = "history_start_id"
-	stateFullStart    = "full_start_history_id"
-	stateFullPhase    = "full_phase"
+	stateHistoryID    = store.StateHistoryID
+	stateListPage     = store.StateListPage
+	stateHistoryPage  = store.StateHistoryPage
+	stateHistoryStart = store.StateHistoryStart
+	stateFullStart    = store.StateFullStart
+	stateFullPhase    = store.StateFullPhase
 
-	phaseList     = "list"
-	phaseListFull = "list_full"
-	phaseCatchup  = "catchup"
+	phaseList     = store.PhaseList
+	phaseListFull = store.PhaseListFull
+	phaseCatchup  = store.PhaseCatchup
 
 	bodyPageSize = 50
 	persistBound = 10 * time.Second
@@ -191,9 +191,9 @@ func (r *Runner) inspectFullResume(ctx context.Context, opt Options, hasHist boo
 	if err != nil {
 		return false, false, err
 	}
-	trustworthy := hasAnchor && parseUint(anchor) > 0
+	trustworthy := hasAnchor && store.ParseStateUint(anchor) > 0
 	if hasPhase {
-		if !knownPhase(phase) {
+		if !store.KnownFullPhase(phase) {
 			mark := opt.Full || hasHist
 			if err := r.restartFull(ctx, profile.HistoryID, mark, !trustworthy); err != nil {
 				return false, false, err
@@ -239,7 +239,7 @@ func (r *Runner) prepareFull(ctx context.Context, anchor uint64, markDeleted, re
 		if err != nil {
 			return err
 		}
-		if !ok || parseUint(cur) == 0 {
+		if !ok || store.ParseStateUint(cur) == 0 {
 			replaceAnchor = true
 		}
 	}
@@ -277,7 +277,7 @@ func (r *Runner) runFull(ctx context.Context, profile gmail.Profile, markDeleted
 	if err != nil {
 		return err
 	}
-	if phase != "" && !knownPhase(phase) {
+	if phase != "" && !store.KnownFullPhase(phase) {
 		return fmt.Errorf("unknown full_phase %q", phase)
 	}
 	startedCatchup := phase == phaseCatchup
@@ -309,7 +309,7 @@ func (r *Runner) afterFull(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	start := parseUint(anchor)
+	start := store.ParseStateUint(anchor)
 	if !ok || start == 0 {
 		return fmt.Errorf("full catchup missing history anchor")
 	}
@@ -384,7 +384,7 @@ func (r *Runner) incremental(ctx context.Context, start uint64) error {
 		return err
 	}
 	if s, ok, _ := r.DB.GetState(ctx, stateHistoryStart); ok {
-		if v := parseUint(s); v > 0 {
+		if v := store.ParseStateUint(s); v > 0 {
 			start = v
 		}
 	}
@@ -402,9 +402,7 @@ func (r *Runner) incremental(ctx context.Context, start uint64) error {
 			return err
 		}
 		need := append([]string{}, page.Added...)
-		for _, u := range page.LabelUpdates {
-			need = append(need, u.ID)
-		}
+		need = append(need, page.LabelChanged...)
 		need = unique(need)
 		msgs, tombs, unresolved := r.fetchParsed(ctx, need, "metadata")
 		if unresolved != nil {
@@ -610,21 +608,12 @@ func (r *Runner) collectFetch(ctx context.Context, ids []string, format string) 
 	return msgs, tombs, unresolved, updates
 }
 
-func knownPhase(phase string) bool {
-	return phase == phaseList || phase == phaseListFull || phase == phaseCatchup
-}
-
 func (r *Runner) noteWrite(n int) {
 	if n <= 0 {
 		return
 	}
 	r.processed += n
 	r.progress(r.phase)
-}
-
-func parseUint(s string) uint64 {
-	v, _ := strconv.ParseUint(s, 10, 64)
-	return v
 }
 
 func unique(ids []string) []string {

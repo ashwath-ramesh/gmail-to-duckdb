@@ -224,7 +224,7 @@ type loginIO struct {
 }
 
 func login(ctx context.Context, cfg *oauth2.Config, port int) (*oauth2.Token, error) {
-	return doLogin(ctx, cfg, port, loginIO{in: os.Stdin, out: os.Stderr, open: openBrowser})
+	return doLogin(ctx, cfg, port, loginIO{in: os.Stdin, out: os.Stderr, open: openurl.Open})
 }
 
 type loginResult struct {
@@ -245,7 +245,8 @@ func doLogin(ctx context.Context, cfg *oauth2.Config, port int, seams loginIO) (
 	if !ok {
 		return nil, fmt.Errorf("oauth listen: unexpected addr %T", ln.Addr())
 	}
-	cfg = cloneConfig(cfg)
+	cp := *cfg
+	cfg = &cp
 	cfg.RedirectURL = fmt.Sprintf("http://127.0.0.1:%d/", addr.Port)
 
 	state, err := randomState()
@@ -459,13 +460,4 @@ func stateEq(a, b string) bool {
 
 func callbackPathOK(p string) bool {
 	return p == "/" || p == ""
-}
-
-func cloneConfig(cfg *oauth2.Config) *oauth2.Config {
-	cp := *cfg
-	return &cp
-}
-
-func openBrowser(url string) error {
-	return openurl.Open(url)
 }

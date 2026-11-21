@@ -351,12 +351,10 @@ func TestHistoryAddDeleteLabel(t *testing.T) {
 		t.Fatal(err)
 	}
 	api.historyPages = []gmail.HistoryPage{{
-		Added:   []string{"new"},
-		Deleted: []string{"del"},
-		LabelUpdates: []gmail.LabelUpdate{{
-			ID: "exist", Labels: []string{"INBOX"},
-		}},
-		HistoryID: 20,
+		Added:        []string{"new"},
+		Deleted:      []string{"del"},
+		LabelChanged: []string{"exist"},
+		HistoryID:    20,
 	}}
 	api.raw["new"] = rawMsg("new", "n@x.com", "N", true, "")
 	api.raw["exist"] = rawMsg("exist", "e@x.com", "E", false, "")
