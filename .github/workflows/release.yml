@@ -53,7 +53,9 @@ jobs:
           go-version-file: go.mod
       - name: Install MinGW
         if: runner.os == 'Windows'
-        run: choco install mingw -y
+        # Pin the C compiler that builds the Windows release binary.
+        # Bump this version on purpose, not by whatever Chocolatey serves today.
+        run: choco install mingw --version=16.2.0 --no-progress -y
       - name: Test
         env:
           CGO_ENABLED: 1
